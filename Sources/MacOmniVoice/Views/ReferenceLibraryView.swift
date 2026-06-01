@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct ReferenceLibraryView: View {
     @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var soundPlayer = SimpleSoundPlayer.shared
 
     /// Optional pick handler — if set, a "Use" button appears that
     /// returns the selected clip's file URL and reference text.
@@ -27,6 +28,10 @@ struct ReferenceLibraryView: View {
             footer
         }
         .frame(minWidth: 720, minHeight: 480)
+        .onDisappear {
+            // Stop any preview when the library closes.
+            soundPlayer.stop()
+        }
         .sheet(isPresented: $showAddSheet) {
             ReferenceClipEditor(mode: .add) { name, desc, refText, sourceURL in
                 addClip(name: name, desc: desc, refText: refText, source: sourceURL)
@@ -103,8 +108,12 @@ struct ReferenceLibraryView: View {
     private var clipList: some View {
         List(selection: $selection) {
             ForEach(app.referenceLibrary.clips) { clip in
-                ReferenceClipRow(clip: clip, isSelected: selection == clip.id) {
-                    play(clip)
+                ReferenceClipRow(
+                    clip: clip,
+                    isSelected: selection == clip.id,
+                    isPlaying: soundPlayer.isPlaying(app.referenceLibrary.fileURL(for: clip))
+                ) {
+                    togglePlay(clip)
                 }
                 .tag(clip.id)
                 .contextMenu {
@@ -129,13 +138,19 @@ struct ReferenceLibraryView: View {
         HStack {
             if let id = selection,
                let clip = app.referenceLibrary.clip(withId: id) {
+                let url = app.referenceLibrary.fileURL(for: clip)
+                let isPlayingThis = soundPlayer.isPlaying(url)
                 Button {
-                    play(clip)
-                } label: { Label("Play", systemImage: "play.circle") }
+                    togglePlay(clip)
+                } label: {
+                    Label(isPlayingThis ? "Stop" : "Play",
+                          systemImage: isPlayingThis ? "stop.circle" : "play.circle")
+                }
                 Button {
                     editing = clip
                 } label: { Label("Edit", systemImage: "pencil") }
                 Button(role: .destructive) {
+                    if isPlayingThis { soundPlayer.stop() }
                     app.referenceLibrary.delete(clip)
                 } label: { Label("Delete", systemImage: "trash") }
             }
@@ -174,9 +189,9 @@ struct ReferenceLibraryView: View {
         }
     }
 
-    private func play(_ clip: ReferenceClip) {
+    private func togglePlay(_ clip: ReferenceClip) {
         let url = app.referenceLibrary.fileURL(for: clip)
-        SimpleSoundPlayer.shared.play(url: url)
+        soundPlayer.toggle(url: url)
     }
 }
 
@@ -185,17 +200,19 @@ struct ReferenceLibraryView: View {
 private struct ReferenceClipRow: View {
     let clip: ReferenceClip
     let isSelected: Bool
+    let isPlaying: Bool
     let onPlay: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Button(action: onPlay) {
-                Image(systemName: "play.circle.fill")
+                Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
                     .imageScale(.large)
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(isPlaying ? Color.red : Color.accentColor)
             }
             .buttonStyle(.borderless)
             .padding(.top, 2)
+            .help(isPlaying ? "Stop" : "Play")
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(clip.name).font(.callout).bold()
@@ -353,24 +370,57 @@ private struct ReferenceClipEditor: View {
     }
 }
 
-// MARK: - Single shared AVAudioPlayer for preview
+// MARK: - Observable single-clip preview player
 
-final class SimpleSoundPlayer {
+@MainActor
+final class SimpleSoundPlayer: NSObject, ObservableObject {
     static let shared = SimpleSoundPlayer()
+
+    @Published private(set) var playingURL: URL? = nil
     private var player: AVAudioPlayer?
+
+    func isPlaying(_ url: URL) -> Bool {
+        playingURL?.standardizedFileURL == url.standardizedFileURL
+    }
+
+    /// Play `url`. If it's already the active clip, stop instead — so a
+    /// single button can serve as Play/Stop.
+    func toggle(url: URL) {
+        if isPlaying(url) {
+            stop()
+        } else {
+            play(url: url)
+        }
+    }
+
     func play(url: URL) {
         player?.stop()
         do {
             let p = try AVAudioPlayer(contentsOf: url)
+            p.delegate = self
             p.prepareToPlay()
             p.play()
             self.player = p
+            self.playingURL = url
         } catch {
+            self.player = nil
+            self.playingURL = nil
             NSSound.beep()
         }
     }
+
     func stop() {
         player?.stop()
         player = nil
+        playingURL = nil
+    }
+}
+
+extension SimpleSoundPlayer: AVAudioPlayerDelegate {
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
+            self.player = nil
+            self.playingURL = nil
+        }
     }
 }
