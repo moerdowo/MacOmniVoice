@@ -25,7 +25,6 @@ struct MainView: View {
                     referenceAudioCard
                     if showAdvanced {
                         AdvancedSettingsView()
-                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                     generateRow
                     if let url = player.currentURL ?? app.synthesisEngine.lastOutput {
@@ -53,7 +52,7 @@ struct MainView: View {
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Button {
-                    withAnimation { showAdvanced.toggle() }
+                    showAdvanced.toggle()
                 } label: {
                     Label(showAdvanced ? "Hide Advanced" : "Advanced",
                           systemImage: "slider.horizontal.3")
