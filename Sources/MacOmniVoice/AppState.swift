@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -17,8 +18,20 @@ final class AppState: ObservableObject {
         case ready
     }
 
+    private var cancellables: Set<AnyCancellable> = []
+
     init() {
         self.synthesisEngine = SynthesisEngine(runtime: pythonRuntime)
+
+        // Re-publish nested observable changes so any view that observes
+        // AppState re-renders when ModelManager, SynthesisEngine, or
+        // settings publish updates.
+        let forward = { [weak self] in self?.objectWillChange.send() }
+        modelManager.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+        synthesisEngine.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+        pythonRuntime.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+        settings.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+
         Task { await bootstrap() }
     }
 

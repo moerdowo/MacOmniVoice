@@ -4,9 +4,20 @@ struct ModelStatusBar: View {
     @EnvironmentObject var app: AppState
 
     var body: some View {
+        // Bridge to a sub-view that explicitly observes ModelManager and
+        // SynthesisEngine so their @Published changes drive re-renders.
+        ModelStatusBarBody(mm: app.modelManager, engine: app.synthesisEngine)
+    }
+}
+
+private struct ModelStatusBarBody: View {
+    @ObservedObject var mm: ModelManager
+    @ObservedObject var engine: SynthesisEngine
+
+    var body: some View {
         VStack(spacing: 8) {
             statusRow
-            if let progress = app.synthesisEngine.downloadProgress {
+            if let progress = engine.downloadProgress {
                 progressRow(progress)
             }
         }
@@ -37,7 +48,6 @@ struct ModelStatusBar: View {
 
     @ViewBuilder
     private var statusRow: some View {
-        let mm = app.modelManager
         HStack(alignment: .center, spacing: 14) {
             Image(systemName: icon(for: mm.updateState))
                 .imageScale(.large)
@@ -46,7 +56,7 @@ struct ModelStatusBar: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(headline(for: mm.updateState))
                     .font(.callout).bold()
-                Text(subline(mm: mm))
+                Text(subline)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
@@ -60,7 +70,7 @@ struct ModelStatusBar: View {
 
             if case .behind = mm.updateState {
                 Button {
-                    Task { try? await app.synthesisEngine.downloadOrUpdateModel(modelId: mm.modelId) }
+                    Task { try? await engine.downloadOrUpdateModel(modelId: mm.modelId) }
                 } label: {
                     Label("Update", systemImage: "arrow.down.circle.fill")
                 }
@@ -68,7 +78,7 @@ struct ModelStatusBar: View {
                 .controlSize(.small)
             } else if case .notInstalled = mm.updateState {
                 Button {
-                    Task { try? await app.synthesisEngine.downloadOrUpdateModel(modelId: mm.modelId) }
+                    Task { try? await engine.downloadOrUpdateModel(modelId: mm.modelId) }
                 } label: {
                     Label("Download", systemImage: "arrow.down.circle.fill")
                 }
@@ -117,7 +127,7 @@ struct ModelStatusBar: View {
             return "Checking model status…"
         }
     }
-    private func subline(mm: ModelManager) -> String {
+    private var subline: String {
         if let local = mm.local {
             let mb = Double(local.sizeOnDisk) / (1024 * 1024)
             return "\(mm.modelId) · \(String(format: "%.0f", mb)) MB · \(local.snapshotPath)"
