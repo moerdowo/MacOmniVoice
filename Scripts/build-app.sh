@@ -53,7 +53,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>NSAppleEventsUsageDescription</key>
     <string>OmniVoice runs a Python sub-process for inference.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>OmniVoice plays generated audio.</string>
+    <string>OmniVoice records short reference clips that are used as voice prompts for cloning.</string>
 </dict>
 </plist>
 PLIST

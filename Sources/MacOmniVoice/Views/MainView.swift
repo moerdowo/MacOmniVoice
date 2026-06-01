@@ -11,7 +11,9 @@ struct MainView: View {
     @State private var refAudioURL: URL? = nil
     @State private var showAdvanced: Bool = false
     @State private var showConsole: Bool = false
+    @State private var showRecorder: Bool = false
     @State private var errorMessage: String? = nil
+    @StateObject private var recorder = AudioRecorderService()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -164,6 +166,22 @@ struct MainView: View {
                         Text("Drop or pick a 3–10 s WAV/MP3/FLAC clip")
                             .foregroundStyle(.secondary)
                         Spacer()
+                    }
+                    Button {
+                        showRecorder = true
+                    } label: {
+                        Label(recorder.isRecording ? "Recording…" : "Record", systemImage: "mic.fill")
+                            .foregroundStyle(recorder.isRecording ? Color.red : Color.primary)
+                    }
+                    .popover(isPresented: $showRecorder, arrowEdge: .top) {
+                        RecorderPopover(
+                            recorder: recorder,
+                            onFinish: { url in
+                                refAudioURL = url
+                                showRecorder = false
+                            },
+                            onCancel: { showRecorder = false }
+                        )
                     }
                     Button {
                         pickReferenceAudio()
