@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+Package.resolved
+build/
+dist/
+MacOmniVoice.app/
+*.log
+.venv/
+__pycache__/

@@ -1,0 +1,210 @@
+import Foundation
+
+/// High-level orchestrator that talks to the Python runner for model load
+/// and synthesis. It also routes other events to the right manager.
+@MainActor
+final class SynthesisEngine: ObservableObject {
+
+    enum EngineState: Equatable {
+        case idle
+        case startingRunner
+        case loadingModel
+        case ready
+        case downloadingModel
+        case synthesizing
+        case error(String)
+
+        var humanLabel: String {
+            switch self {
+            case .idle: return "Idle"
+            case .startingRunner: return "Starting Python runner…"
+            case .loadingModel: return "Loading OmniVoice model…"
+            case .ready: return "Ready"
+            case .downloadingModel: return "Downloading model from HuggingFace…"
+            case .synthesizing: return "Synthesizing…"
+            case .error(let s): return "Error: \(s)"
+            }
+        }
+    }
+
+    @Published var state: EngineState = .idle
+    @Published var modelLoaded: Bool = false
+    @Published var lastOutput: URL? = nil
+    @Published var lastError: String? = nil
+    @Published var consoleLog: [String] = []
+
+    private let runtime: PythonRuntime
+    weak var modelManager: ModelManager?
+    private var pumpTask: Task<Void, Never>? = nil
+    private var pendingSynthesisContinuation: CheckedContinuation<URL, Error>? = nil
+    private var pendingLoadContinuation: CheckedContinuation<Void, Error>? = nil
+    private var pendingDownloadContinuation: CheckedContinuation<Void, Error>? = nil
+
+    init(runtime: PythonRuntime) {
+        self.runtime = runtime
+    }
+
+    func attach(modelManager: ModelManager) {
+        self.modelManager = modelManager
+    }
+
+    /// Start the persistent Python subprocess and begin pumping events.
+    func startRunnerAndPump() throws {
+        state = .startingRunner
+        try runtime.startRunnerIfNeeded()
+        startPump()
+        state = .ready
+    }
+
+    private func startPump() {
+        pumpTask?.cancel()
+        pumpTask = Task { [weak self] in
+            guard let self else { return }
+            for await event in runtime.events() {
+                await self.handle(event: event)
+            }
+        }
+    }
+
+    private func appendLog(_ s: String) {
+        consoleLog.append(s)
+        if consoleLog.count > 500 {
+            consoleLog.removeFirst(consoleLog.count - 500)
+        }
+    }
+
+    private func handle(event: [String: Any]) async {
+        let kind = event["event"] as? String ?? "?"
+        switch kind {
+        case "log":
+            let lvl = (event["level"] as? String) ?? "info"
+            let msg = (event["msg"] as? String) ?? ""
+            appendLog("[\(lvl)] \(msg)")
+
+        case "load_start":
+            state = .loadingModel
+            appendLog("Loading model on \((event["device"] as? String) ?? "?")…")
+        case "load_done":
+            modelLoaded = true
+            state = .ready
+            appendLog("Model loaded (sample rate \(event["sampling_rate"] ?? "?"), device \(event["device"] ?? "?")).")
+            pendingLoadContinuation?.resume()
+            pendingLoadContinuation = nil
+
+        case "synthesize_start":
+            state = .synthesizing
+            appendLog("Synthesizing…")
+        case "synthesize_done":
+            state = .ready
+            let path = (event["out_path"] as? String) ?? ""
+            let elapsed = (event["elapsed"] as? Double) ?? 0
+            appendLog("Done in \(String(format: "%.2f", elapsed))s → \(path)")
+            let url = URL(fileURLWithPath: path)
+            self.lastOutput = url
+            pendingSynthesisContinuation?.resume(returning: url)
+            pendingSynthesisContinuation = nil
+
+        case "download_start":
+            state = .downloadingModel
+            modelManager?.isDownloading = true
+            appendLog("Downloading \(event["model_id"] ?? "")…")
+        case "download_done":
+            state = .ready
+            appendLog("Download complete → \((event["snapshot_path"] as? String) ?? "?")")
+            modelManager?.downloadFinished()
+            pendingDownloadContinuation?.resume()
+            pendingDownloadContinuation = nil
+            // After download, refresh local info.
+            try? runtime.send(["action": "model_info", "model_id": modelManager?.modelId ?? "k2-fsa/OmniVoice"])
+
+        case "model_info":
+            modelManager?.ingest(modelInfo: event)
+
+        case "error":
+            let msg = (event["msg"] as? String) ?? "unknown"
+            self.lastError = msg
+            appendLog("ERROR: \(msg)")
+            state = .error(msg)
+            pendingSynthesisContinuation?.resume(throwing: NSError(domain: "OmniVoice", code: -1, userInfo: [NSLocalizedDescriptionKey: msg]))
+            pendingSynthesisContinuation = nil
+            pendingLoadContinuation?.resume(throwing: NSError(domain: "OmniVoice", code: -1, userInfo: [NSLocalizedDescriptionKey: msg]))
+            pendingLoadContinuation = nil
+            pendingDownloadContinuation?.resume(throwing: NSError(domain: "OmniVoice", code: -1, userInfo: [NSLocalizedDescriptionKey: msg]))
+            pendingDownloadContinuation = nil
+
+        case "bye":
+            appendLog("Runner exiting.")
+        default:
+            break
+        }
+    }
+
+    /// Ensure model is loaded; loads on first call.
+    func ensureModelLoaded(modelId: String, deviceOverride: String? = nil) async throws {
+        if modelLoaded { return }
+        try? runtime.startRunnerIfNeeded()
+        if pumpTask == nil { startPump() }
+        var payload: [String: Any] = [
+            "action": "load",
+            "model_id": modelId,
+        ]
+        if let dev = deviceOverride, !dev.isEmpty {
+            payload["device"] = dev
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            self.pendingLoadContinuation = cont
+            do {
+                try runtime.send(payload)
+            } catch {
+                self.pendingLoadContinuation = nil
+                cont.resume(throwing: error)
+            }
+        }
+    }
+
+    func synthesize(_ request: SynthesisRequest,
+                    modelId: String,
+                    deviceOverride: String?) async throws -> URL {
+        try await ensureModelLoaded(modelId: modelId, deviceOverride: deviceOverride)
+
+        // Write output to a temp file under appsupport/outputs.
+        let outDir = PythonRuntime.appSupportDir.appendingPathComponent("outputs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let ts = ISO8601DateFormatter()
+        ts.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
+        let stamp = ts.string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
+        let outURL = outDir.appendingPathComponent("omnivoice-\(stamp).wav")
+
+        let payload: [String: Any] = [
+            "action": "synthesize",
+            "out_path": outURL.path,
+            "params": request.toParams(),
+        ]
+
+        return try await withCheckedThrowingContinuation { cont in
+            self.pendingSynthesisContinuation = cont
+            do {
+                try runtime.send(payload)
+            } catch {
+                self.pendingSynthesisContinuation = nil
+                cont.resume(throwing: error)
+            }
+        }
+    }
+
+    func downloadOrUpdateModel(modelId: String) async throws {
+        try? runtime.startRunnerIfNeeded()
+        if pumpTask == nil { startPump() }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            self.pendingDownloadContinuation = cont
+            do {
+                try runtime.send(["action": "download", "model_id": modelId])
+            } catch {
+                self.pendingDownloadContinuation = nil
+                cont.resume(throwing: error)
+            }
+        }
+    }
+}
