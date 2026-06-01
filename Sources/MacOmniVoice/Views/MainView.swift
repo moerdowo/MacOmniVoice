@@ -253,7 +253,9 @@ struct MainView: View {
         switch app.synthesisEngine.state {
         case .loadingModel: return "Loading model…"
         case .downloadingModel: return "Downloading model…"
-        case .synthesizing: return "Generating…"
+        case .synthesizing:
+            let s = app.synthesisEngine.synthesisElapsed
+            return s > 0 ? String(format: "Generating… %.1fs", s) : "Generating…"
         default: return "Generate"
         }
     }

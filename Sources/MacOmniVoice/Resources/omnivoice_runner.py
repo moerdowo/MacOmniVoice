@@ -250,6 +250,7 @@ def synthesize(params: dict, out_path: str) -> None:
     if _model is None:
         raise RuntimeError("Model is not loaded yet. Send 'load' first.")
 
+    import threading
     import soundfile as sf  # type: ignore
 
     sig = inspect.signature(_model.generate)  # type: ignore[attr-defined]
@@ -268,9 +269,37 @@ def synthesize(params: dict, out_path: str) -> None:
     if "text" not in kwargs:
         raise ValueError("Missing required 'text' parameter.")
 
-    emit({"event": "synthesize_start", "accepted": sorted(kwargs.keys())})
+    emit({
+        "event": "synthesize_start",
+        "accepted": sorted(kwargs.keys()),
+        "num_step": int(kwargs.get("num_step", 0) or 0),
+        "device": _device or "?",
+    })
+
+    # Heartbeat so the UI can show "Generating… 12.4s" instead of an
+    # opaque spinner that looks frozen during slow MPS ops.
+    stop = threading.Event()
+
+    def tick():
+        t0 = time.time()
+        while not stop.is_set():
+            stop.wait(0.5)
+            if stop.is_set():
+                break
+            emit({
+                "event": "synthesize_progress",
+                "elapsed": round(time.time() - t0, 2),
+            })
+
+    hb = threading.Thread(target=tick, daemon=True)
+    hb.start()
+
     started = time.time()
-    audios = _model.generate(**kwargs)  # type: ignore[attr-defined]
+    try:
+        audios = _model.generate(**kwargs)  # type: ignore[attr-defined]
+    finally:
+        stop.set()
+        hb.join(timeout=1.0)
     elapsed = time.time() - started
 
     out = Path(out_path).expanduser()

@@ -32,6 +32,8 @@ final class SynthesisEngine: ObservableObject {
     @Published var lastOutput: URL? = nil
     @Published var lastError: String? = nil
     @Published var consoleLog: [String] = []
+    /// Live elapsed seconds while a synth is in progress (from runner heartbeat).
+    @Published var synthesisElapsed: Double = 0
 
     /// Aggregate download progress shown in the UI. nil = no active download.
     @Published var downloadProgress: DownloadProgress? = nil
@@ -112,11 +114,19 @@ final class SynthesisEngine: ObservableObject {
 
         case "synthesize_start":
             state = .synthesizing
-            appendLog("Synthesizing…")
+            synthesisElapsed = 0
+            let step = (event["num_step"] as? Int) ?? 0
+            let dev = (event["device"] as? String) ?? "?"
+            appendLog("Synthesizing on \(dev) (num_step=\(step))…")
+        case "synthesize_progress":
+            if let e = event["elapsed"] as? Double {
+                synthesisElapsed = e
+            }
         case "synthesize_done":
             state = .ready
             let path = (event["out_path"] as? String) ?? ""
             let elapsed = (event["elapsed"] as? Double) ?? 0
+            synthesisElapsed = 0
             appendLog("Done in \(String(format: "%.2f", elapsed))s → \(path)")
             let url = URL(fileURLWithPath: path)
             self.lastOutput = url

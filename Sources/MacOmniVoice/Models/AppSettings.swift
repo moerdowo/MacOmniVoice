@@ -32,7 +32,11 @@ final class AppSettings: ObservableObject {
         instruct           = d.string(forKey: "instruct") ?? ""
         speed              = d.object(forKey: "speed") as? Double ?? 1.0
         duration           = d.object(forKey: "duration") as? Double ?? 0
-        numStep            = d.object(forKey: "numStep") as? Int ?? 32
+        // Default to 16 instead of 32 — 32 is much slower on Apple
+        // Silicon MPS (cumsum & other ops are unoptimised) and the
+        // quality difference is small. Power users can crank it back
+        // up in Advanced.
+        numStep            = d.object(forKey: "numStep") as? Int ?? 16
         guidanceScale      = d.object(forKey: "guidanceScale") as? Double ?? 2.0
         denoise            = d.object(forKey: "denoise") as? Bool ?? true
         postprocessOutput  = d.object(forKey: "postprocessOutput") as? Bool ?? true
