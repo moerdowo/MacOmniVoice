@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct ModelStatusBar: View {
     @EnvironmentObject var app: AppState
@@ -68,6 +69,14 @@ private struct ModelStatusBarBody: View {
                 ProgressView().controlSize(.small)
             }
 
+            Button {
+                revealInFinder()
+            } label: {
+                Label("Finder", systemImage: "folder")
+            }
+            .controlSize(.small)
+            .help("Reveal the model folder in Finder")
+
             if case .behind = mm.updateState {
                 Button {
                     Task { try? await engine.downloadOrUpdateModel(modelId: mm.modelId) }
@@ -92,6 +101,19 @@ private struct ModelStatusBarBody: View {
                 }
                 .controlSize(.small)
             }
+        }
+    }
+
+    private func revealInFinder() {
+        guard let url = mm.revealableLocation() else { return }
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+        if exists, isDir.boolValue {
+            NSWorkspace.shared.open(url)
+        } else if exists {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(PythonRuntime.appSupportDir)
         }
     }
 
@@ -128,10 +150,30 @@ private struct ModelStatusBarBody: View {
         }
     }
     private var subline: String {
-        if let local = mm.local {
-            let mb = Double(local.sizeOnDisk) / (1024 * 1024)
-            return "\(mm.modelId) · \(String(format: "%.0f", mb)) MB · \(local.snapshotPath)"
+        var parts: [String] = [mm.modelId]
+
+        let downloaded = mm.local?.sizeOnDisk ?? 0
+        let total = mm.remote?.totalBytes ?? 0
+
+        if total > 0 && downloaded > 0 {
+            parts.append("\(format(downloaded)) / \(format(total)) downloaded")
+        } else if total > 0 {
+            parts.append("\(format(total)) total")
+        } else if downloaded > 0 {
+            parts.append("\(format(downloaded)) on disk")
         }
-        return mm.modelId
+
+        if let remote = mm.remote, remote.mainFileBytes > 0 {
+            parts.append("\(remote.mainFileName.isEmpty ? "main" : remote.mainFileName): \(format(remote.mainFileBytes))")
+        }
+
+        return parts.joined(separator: " · ")
+    }
+
+    private func format(_ bytes: Int64) -> String {
+        let gb = Double(bytes) / (1024 * 1024 * 1024)
+        if gb >= 0.95 { return String(format: "%.2f GB", gb) }
+        let mb = Double(bytes) / (1024 * 1024)
+        return String(format: "%.0f MB", mb)
     }
 }

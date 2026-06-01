@@ -14,6 +14,11 @@ final class ModelManager: ObservableObject {
     struct RemoteHead: Equatable {
         var sha: String
         var lastModified: String?
+        /// Sum of all file sizes in the repo tree (bytes).
+        var totalBytes: Int64
+        /// Largest single file in the repo (typically the main weights).
+        var mainFileBytes: Int64
+        var mainFileName: String
     }
 
     enum UpdateState: Equatable {
@@ -65,42 +70,99 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Hit the HuggingFace API to get the latest commit SHA for the model repo.
+    /// Hit the HuggingFace API to get the latest commit SHA + total size.
     func checkForUpdate(force: Bool = false) async {
         isChecking = true
         defer { isChecking = false }
 
+        async let head: RemoteHead? = fetchHead()
+        async let tree: (total: Int64, mainSize: Int64, mainName: String)? = fetchTreeTotals()
+
+        let h = await head
+        let t = await tree
+
+        guard let h = h else {
+            updateState = .error("Could not reach HuggingFace API")
+            return
+        }
+        var merged = h
+        if let t = t {
+            merged.totalBytes = t.total
+            merged.mainFileBytes = t.mainSize
+            merged.mainFileName = t.mainName
+        }
+        self.remote = merged
+
+        if let local = local {
+            updateState = (local.revision == merged.sha)
+                ? .upToDate(local: merged.sha)
+                : .behind(local: local.revision, remote: merged.sha)
+        } else {
+            updateState = .notInstalled
+        }
+    }
+
+    private func fetchHead() async -> RemoteHead? {
         let url = URL(string: "https://huggingface.co/api/models/\(modelId)")!
         var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.setValue("MacOmniVoice/0.1 (+https://github.com/k2-fsa/OmniVoice)", forHTTPHeaderField: "User-Agent")
-
+        req.setValue("MacOmniVoice/0.1 (+https://github.com/k2-fsa/OmniVoice)",
+                     forHTTPHeaderField: "User-Agent")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-                updateState = .error("HF API HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
-                return
-            }
-            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                updateState = .error("Invalid HF JSON")
-                return
-            }
-            let sha = (obj["sha"] as? String) ?? ""
-            let modified = obj["lastModified"] as? String
-            self.remote = RemoteHead(sha: sha, lastModified: modified)
-
-            if let local = local {
-                if local.revision == sha {
-                    updateState = .upToDate(local: sha)
-                } else {
-                    updateState = .behind(local: local.revision, remote: sha)
-                }
-            } else {
-                updateState = .notInstalled
-            }
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sha = obj["sha"] as? String else { return nil }
+            return RemoteHead(
+                sha: sha,
+                lastModified: obj["lastModified"] as? String,
+                totalBytes: 0,
+                mainFileBytes: 0,
+                mainFileName: ""
+            )
         } catch {
-            updateState = .error(error.localizedDescription)
+            return nil
         }
+    }
+
+    private func fetchTreeTotals() async -> (total: Int64, mainSize: Int64, mainName: String)? {
+        let url = URL(string: "https://huggingface.co/api/models/\(modelId)/tree/main?recursive=true")!
+        var req = URLRequest(url: url)
+        req.setValue("MacOmniVoice/0.1 (+https://github.com/k2-fsa/OmniVoice)",
+                     forHTTPHeaderField: "User-Agent")
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let files = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+            else { return nil }
+            var total: Int64 = 0
+            var mainSize: Int64 = 0
+            var mainName = ""
+            for f in files {
+                let sz = (f["size"] as? Int64) ?? Int64((f["size"] as? Int) ?? 0)
+                total += sz
+                if sz > mainSize {
+                    mainSize = sz
+                    mainName = (f["path"] as? String) ?? ""
+                }
+            }
+            return (total, mainSize, mainName)
+        } catch {
+            return nil
+        }
+    }
+
+    /// Returns the directory containing the locally cached model snapshot
+    /// (if any), otherwise the HF Hub cache root that we can still reveal.
+    func revealableLocation() -> URL? {
+        if let local = local {
+            return URL(fileURLWithPath: local.snapshotPath)
+        }
+        let cache = (NSHomeDirectory() as NSString)
+            .appendingPathComponent(".cache/huggingface/hub")
+        if FileManager.default.fileExists(atPath: cache) {
+            return URL(fileURLWithPath: cache)
+        }
+        return PythonRuntime.appSupportDir
     }
 
     /// Trigger a download via the Python runner (huggingface_hub snapshot_download).

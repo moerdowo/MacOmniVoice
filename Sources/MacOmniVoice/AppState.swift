@@ -42,6 +42,9 @@ final class AppState: ObservableObject {
         case .ready:
             currentStage = .ready
             await modelManager.refreshLocalStatus(runtime: pythonRuntime)
+            if settings.autoCheckUpdates {
+                await modelManager.checkForUpdate()
+            }
         case .needsSetup:
             currentStage = .needsSetup
         }
