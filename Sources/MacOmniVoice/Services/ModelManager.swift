@@ -38,6 +38,14 @@ final class ModelManager: ObservableObject {
 
     let modelId = "k2-fsa/OmniVoice"
 
+    /// True only when the locally downloaded size is within ~5% of the
+    /// HF Hub repo total. Partial / aborted downloads count as incomplete.
+    var isFullyDownloaded: Bool {
+        guard let total = remote?.totalBytes, total > 0,
+              let local = local else { return false }
+        return Double(local.sizeOnDisk) >= Double(total) * 0.95
+    }
+
     func refreshLocalStatus(runtime: PythonRuntime) async {
         guard runtime.isRunnerLive || ((try? runtime.startRunnerIfNeeded()) != nil) else {
             updateState = .notInstalled

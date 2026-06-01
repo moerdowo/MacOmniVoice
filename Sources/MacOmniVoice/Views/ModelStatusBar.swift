@@ -77,30 +77,51 @@ private struct ModelStatusBarBody: View {
             .controlSize(.small)
             .help(finderTooltip)
 
-            if case .behind = mm.updateState {
-                Button {
-                    Task { try? await engine.downloadOrUpdateModel(modelId: mm.modelId) }
-                } label: {
-                    Label("Update", systemImage: "arrow.down.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            } else if case .notInstalled = mm.updateState {
-                Button {
-                    Task { try? await engine.downloadOrUpdateModel(modelId: mm.modelId) }
-                } label: {
-                    Label("Download", systemImage: "arrow.down.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            } else {
-                Button {
-                    Task { await mm.checkForUpdate(force: true) }
-                } label: {
-                    Label("Check", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .controlSize(.small)
+            Button {
+                Task { await mm.checkForUpdate(force: true) }
+            } label: {
+                Label("Check", systemImage: "arrow.triangle.2.circlepath")
             }
+            .controlSize(.small)
+            .help("Re-check the HuggingFace Hub for updates")
+
+            Button {
+                Task { try? await engine.downloadOrUpdateModel(modelId: mm.modelId) }
+            } label: {
+                Label(downloadButtonLabel, systemImage: downloadButtonIcon)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(engine.downloadProgress != nil)
+            .help(downloadTooltip)
+        }
+    }
+
+    private var downloadButtonLabel: String {
+        if engine.downloadProgress != nil { return "Downloading…" }
+        switch mm.updateState {
+        case .behind: return "Update"
+        case .notInstalled: return "Download"
+        default:
+            return mm.isFullyDownloaded ? "Re-download" : "Resume download"
+        }
+    }
+    private var downloadButtonIcon: String {
+        switch mm.updateState {
+        case .behind: return "arrow.down.circle.fill"
+        default:
+            return mm.isFullyDownloaded ? "arrow.clockwise.circle" : "arrow.down.circle.fill"
+        }
+    }
+    private var downloadTooltip: String {
+        switch mm.updateState {
+        case .behind: return "Download the newer revision from HuggingFace"
+        case .notInstalled: return "Download the model from HuggingFace (~3 GB)"
+        default:
+            if mm.isFullyDownloaded {
+                return "Re-download the model from HuggingFace (verifies file integrity)"
+            }
+            return "Resume the partial download from HuggingFace"
         }
     }
 
@@ -146,6 +167,11 @@ private struct ModelStatusBarBody: View {
     private func headline(for state: ModelManager.UpdateState) -> String {
         switch state {
         case .upToDate(let rev):
+            if let total = mm.remote?.totalBytes, total > 0,
+               let local = mm.local, !mm.isFullyDownloaded {
+                let pct = Int((Double(local.sizeOnDisk) / Double(total)) * 100)
+                return "Partial download · \(pct)% of \(String(rev.prefix(8)))"
+            }
             return "Model up to date · \(String(rev.prefix(8)))"
         case .behind(let local, let remote):
             return "Update available · \(String(local.prefix(8))) → \(String(remote.prefix(8)))"
