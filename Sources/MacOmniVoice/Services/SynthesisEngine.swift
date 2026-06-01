@@ -33,6 +33,25 @@ final class SynthesisEngine: ObservableObject {
     @Published var lastError: String? = nil
     @Published var consoleLog: [String] = []
 
+    /// Aggregate download progress shown in the UI. nil = no active download.
+    @Published var downloadProgress: DownloadProgress? = nil
+
+    struct DownloadProgress: Equatable {
+        var label: String
+        var n: Int64
+        var total: Int64
+        var fraction: Double {
+            guard total > 0 else { return 0 }
+            return min(1, max(0, Double(n) / Double(total)))
+        }
+        var humanLabel: String {
+            if total == 0 { return label }
+            let mb = Double(total) / (1024 * 1024)
+            let done = Double(n) / (1024 * 1024)
+            return "\(label) · \(String(format: "%.1f / %.1f MB", done, mb))"
+        }
+    }
+
     private let runtime: PythonRuntime
     weak var modelManager: ModelManager?
     private var pumpTask: Task<Void, Never>? = nil
@@ -107,9 +126,16 @@ final class SynthesisEngine: ObservableObject {
         case "download_start":
             state = .downloadingModel
             modelManager?.isDownloading = true
+            downloadProgress = DownloadProgress(label: "Starting download…", n: 0, total: 0)
             appendLog("Downloading \(event["model_id"] ?? "")…")
+        case "download_progress":
+            let n = (event["n"] as? Int).map(Int64.init) ?? 0
+            let total = (event["total"] as? Int).map(Int64.init) ?? 0
+            let desc = (event["desc"] as? String) ?? "Downloading"
+            downloadProgress = DownloadProgress(label: desc, n: n, total: total)
         case "download_done":
             state = .ready
+            downloadProgress = nil
             appendLog("Download complete → \((event["snapshot_path"] as? String) ?? "?")")
             modelManager?.downloadFinished()
             pendingDownloadContinuation?.resume()

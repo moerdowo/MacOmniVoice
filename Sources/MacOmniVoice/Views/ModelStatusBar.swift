@@ -4,8 +4,41 @@ struct ModelStatusBar: View {
     @EnvironmentObject var app: AppState
 
     var body: some View {
+        VStack(spacing: 8) {
+            statusRow
+            if let progress = app.synthesisEngine.downloadProgress {
+                progressRow(progress)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.background.secondary)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator))
+    }
+
+    private func progressRow(_ p: SynthesisEngine.DownloadProgress) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if p.total > 0 {
+                ProgressView(value: p.fraction)
+                    .progressViewStyle(.linear)
+                Text(p.humanLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                Text(p.label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusRow: some View {
         let mm = app.modelManager
-        return HStack(alignment: .center, spacing: 14) {
+        HStack(alignment: .center, spacing: 14) {
             Image(systemName: icon(for: mm.updateState))
                 .imageScale(.large)
                 .foregroundStyle(color(for: mm.updateState))
@@ -50,11 +83,6 @@ struct ModelStatusBar: View {
                 .controlSize(.small)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.background.secondary)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator))
     }
 
     private func icon(for state: ModelManager.UpdateState) -> String {

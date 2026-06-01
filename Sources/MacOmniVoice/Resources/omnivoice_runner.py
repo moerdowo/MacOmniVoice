@@ -46,6 +46,65 @@ def log(level: str, msg: str) -> None:
     emit({"event": "log", "level": level, "msg": msg})
 
 
+# --- HuggingFace download progress -----------------------------------------
+
+def _make_progress_tqdm():
+    """Return a custom tqdm class that emits JSON progress events."""
+    try:
+        from tqdm.auto import tqdm as _tqdm
+    except Exception:
+        return None
+
+    class JSONTqdm(_tqdm):  # type: ignore[misc]
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._last_emit = 0
+            self._emit("start")
+
+        def update(self, n=1):
+            super().update(n)
+            now = time.time()
+            # Throttle to ~5 events per second per bar.
+            if now - self._last_emit > 0.2 or (self.total and self.n >= self.total):
+                self._emit("update")
+                self._last_emit = now
+
+        def close(self):
+            try:
+                self._emit("close")
+            finally:
+                super().close()
+
+        def _emit(self, kind):
+            try:
+                emit({
+                    "event": "download_progress",
+                    "phase": kind,
+                    "desc": str(self.desc or ""),
+                    "unit": str(self.unit or ""),
+                    "n": int(self.n or 0),
+                    "total": int(self.total or 0) if self.total else 0,
+                })
+            except Exception:
+                pass
+
+    return JSONTqdm
+
+
+def _ensure_model_downloaded(model_id: str) -> str:
+    """Use huggingface_hub.snapshot_download with progress emission so the
+    UI can show a real progress bar before from_pretrained runs."""
+    from huggingface_hub import snapshot_download  # type: ignore
+    tqdm_class = _make_progress_tqdm()
+    emit({"event": "download_start", "model_id": model_id})
+    if tqdm_class is not None:
+        path = snapshot_download(repo_id=model_id, tqdm_class=tqdm_class)
+    else:
+        path = snapshot_download(repo_id=model_id)
+    emit({"event": "download_done", "model_id": model_id, "snapshot_path": str(path)})
+    return path
+
+
 _model = None
 _sampling_rate: int | None = None
 _device: str | None = None
@@ -76,6 +135,13 @@ def load_model(model_id: str, device_override: str | None = None) -> None:
 
     device = device_override or _get_best_device()
     emit({"event": "load_start", "model_id": model_id, "device": device})
+
+    # Pre-download with explicit progress so the UI isn't left wondering
+    # whether the (potentially multi-GB) HF weights are stuck.
+    try:
+        _ensure_model_downloaded(model_id)
+    except Exception as e:
+        log("warn", f"snapshot_download failed ({e}); falling back to from_pretrained.")
 
     # MPS prefers float16; CPU prefers float32 for stability.
     dtype = torch.float16 if device != "cpu" else torch.float32
@@ -168,10 +234,7 @@ def model_info(model_id: str) -> None:
 
 def download_model(model_id: str) -> None:
     """Force download / refresh the model snapshot via huggingface_hub."""
-    from huggingface_hub import snapshot_download  # type: ignore
-    emit({"event": "download_start", "model_id": model_id})
-    path = snapshot_download(repo_id=model_id)
-    emit({"event": "download_done", "model_id": model_id, "snapshot_path": str(path)})
+    _ensure_model_downloaded(model_id)
 
 
 def main() -> None:
