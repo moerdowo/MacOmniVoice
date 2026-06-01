@@ -56,4 +56,50 @@ final class AppState: ObservableObject {
         currentStage = .ready
         await modelManager.refreshLocalStatus(runtime: pythonRuntime)
     }
+
+    enum GeneratePreflight: Equatable {
+        case ready
+        case blocked(reason: String, hint: String)
+    }
+
+    /// All-up gate for the Generate button. Returns either .ready or a
+    /// human-readable reason the user can act on.
+    func preflightForGenerate(text: String) -> GeneratePreflight {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return .blocked(reason: "Enter some text to synthesize.",
+                            hint: "Type a sentence in the text box above.")
+        }
+        if currentStage != .ready {
+            return .blocked(reason: "Setup is not complete yet.",
+                            hint: "Finish the initial OmniVoice install before generating.")
+        }
+        if !pythonRuntime.isRunnerLive {
+            return .blocked(reason: "OmniVoice runner is not running.",
+                            hint: "Try restarting the app — the Python subprocess died.")
+        }
+        if synthesisEngine.downloadProgress != nil {
+            return .blocked(reason: "Model is downloading.",
+                            hint: "Wait for the download to finish, then click Generate.")
+        }
+        if !modelManager.isFullyDownloaded {
+            return .blocked(reason: "Model weights are not fully downloaded.",
+                            hint: "Click the Download button above to fetch the ~3 GB model from HuggingFace.")
+        }
+        if synthesisEngine.isBusy {
+            return .blocked(reason: "Already generating audio.",
+                            hint: "One synthesis at a time — wait for the current run to finish.")
+        }
+        switch synthesisEngine.state {
+        case .loadingModel:
+            return .blocked(reason: "Loading model into memory.",
+                            hint: "First-load takes ~30–60 s on Apple Silicon; please wait.")
+        case .startingRunner:
+            return .blocked(reason: "Starting Python runner.",
+                            hint: "Almost ready…")
+        default:
+            break
+        }
+        return .ready
+    }
 }

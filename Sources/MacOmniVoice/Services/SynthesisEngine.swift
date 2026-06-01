@@ -34,6 +34,10 @@ final class SynthesisEngine: ObservableObject {
     @Published var consoleLog: [String] = []
     /// Live elapsed seconds while a synth is in progress (from runner heartbeat).
     @Published var synthesisElapsed: Double = 0
+    /// True from the moment Generate is clicked until the synth resolves or fails.
+    /// Used to suppress reentrant clicks that would otherwise overwrite the
+    /// pending-continuation and leak the first Task.
+    @Published var isBusy: Bool = false
 
     /// Aggregate download progress shown in the UI. nil = no active download.
     @Published var downloadProgress: DownloadProgress? = nil
@@ -203,6 +207,11 @@ final class SynthesisEngine: ObservableObject {
             payload["device"] = dev
         }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            if let stale = self.pendingLoadContinuation {
+                stale.resume(throwing: NSError(
+                    domain: "OmniVoice", code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: "Superseded by a newer load request."]))
+            }
             self.pendingLoadContinuation = cont
             do {
                 try runtime.send(payload)
@@ -216,6 +225,16 @@ final class SynthesisEngine: ObservableObject {
     func synthesize(_ request: SynthesisRequest,
                     modelId: String,
                     deviceOverride: String?) async throws -> URL {
+        // Reject re-entrant calls. Prevents the click-twice bug where a
+        // second click overwrites pendingSynthesisContinuation and the
+        // first awaiting Task hangs forever.
+        if isBusy {
+            throw NSError(domain: "OmniVoice", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "Already generating — please wait."])
+        }
+        isBusy = true
+        defer { isBusy = false }
+
         try await ensureModelLoaded(modelId: modelId, deviceOverride: deviceOverride)
 
         // Write output to a temp file under appsupport/outputs.
@@ -235,6 +254,14 @@ final class SynthesisEngine: ObservableObject {
         ]
 
         return try await withCheckedThrowingContinuation { cont in
+            // Defensive: if a continuation is somehow still pending (e.g.
+            // a previous synth was abandoned), resume it with an error
+            // before overwriting so it doesn't leak.
+            if let stale = self.pendingSynthesisContinuation {
+                stale.resume(throwing: NSError(
+                    domain: "OmniVoice", code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: "Superseded by a newer request."]))
+            }
             self.pendingSynthesisContinuation = cont
             do {
                 try runtime.send(payload)

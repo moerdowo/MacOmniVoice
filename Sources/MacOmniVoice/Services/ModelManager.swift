@@ -40,10 +40,16 @@ final class ModelManager: ObservableObject {
 
     /// True only when the locally downloaded size is within ~5% of the
     /// HF Hub repo total. Partial / aborted downloads count as incomplete.
+    /// When the remote total isn't known (offline / API blocked), we
+    /// fall back to trusting `huggingface_hub.scan_cache_dir` — if it
+    /// reports a snapshot with > 1 GB of blobs, the weights are present.
     var isFullyDownloaded: Bool {
-        guard let total = remote?.totalBytes, total > 0,
-              let local = local else { return false }
-        return Double(local.sizeOnDisk) >= Double(total) * 0.95
+        guard let local = local else { return false }
+        if let total = remote?.totalBytes, total > 0 {
+            return Double(local.sizeOnDisk) >= Double(total) * 0.95
+        }
+        // Heuristic when we have no remote info: ≥1 GB cached.
+        return local.sizeOnDisk >= 1_000_000_000
     }
 
     func refreshLocalStatus(runtime: PythonRuntime) async {

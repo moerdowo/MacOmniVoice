@@ -213,30 +213,42 @@ struct MainView: View {
     }
 
     private var generateRow: some View {
-        HStack {
-            Spacer()
-            Button {
-                Task { await generate() }
-            } label: {
-                HStack(spacing: 8) {
-                    if app.synthesisEngine.state == .synthesizing ||
-                        app.synthesisEngine.state == .loadingModel ||
-                        app.synthesisEngine.state == .downloadingModel {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "sparkles")
+        let preflight = app.preflightForGenerate(text: text)
+        return VStack(alignment: .trailing, spacing: 6) {
+            HStack {
+                if case let .blocked(reason, hint) = preflight {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(reason).font(.callout).bold()
+                            Text(hint).font(.caption).foregroundStyle(.secondary)
+                        }
                     }
-                    Text(generateButtonLabel)
-                        .bold()
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 6)
+                Spacer()
+                Button {
+                    Task { await generate() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if app.synthesisEngine.state == .synthesizing ||
+                            app.synthesisEngine.state == .loadingModel ||
+                            app.synthesisEngine.state == .downloadingModel {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "sparkles")
+                        }
+                        Text(generateButtonLabel)
+                            .bold()
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 6)
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(preflight != .ready)
             }
-            .keyboardShortcut(.return, modifiers: [.command])
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                      isWorking)
         }
     }
 
