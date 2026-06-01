@@ -91,16 +91,100 @@ def _make_progress_tqdm():
     return JSONTqdm
 
 
+def _hf_repo_cache_dir(model_id: str):
+    """Path to the per-repo cache dir, e.g.
+    ~/.cache/huggingface/hub/models--k2-fsa--OmniVoice — without importing
+    the constants module (which has differed across hub versions)."""
+    from pathlib import Path
+    try:
+        from huggingface_hub import constants  # type: ignore
+        base = Path(constants.HF_HUB_CACHE)
+    except Exception:
+        base = Path.home() / ".cache/huggingface/hub"
+    return base / ("models--" + model_id.replace("/", "--"))
+
+
+def _measure_cached_bytes(repo_dir) -> tuple[int, int]:
+    """Return (downloaded_bytes, in_flight_bytes) inside the repo cache.
+
+    `downloaded_bytes` counts finalised blobs; `in_flight_bytes` counts
+    `*.incomplete` shards currently being written. Together they're the
+    real number to display.
+    """
+    if not repo_dir.exists():
+        return (0, 0)
+    blobs = repo_dir / "blobs"
+    if not blobs.exists():
+        return (0, 0)
+    done = 0
+    pending = 0
+    try:
+        for p in blobs.iterdir():
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            if p.name.endswith(".incomplete"):
+                pending += sz
+            else:
+                done += sz
+    except OSError:
+        pass
+    return (done, pending)
+
+
 def _ensure_model_downloaded(model_id: str) -> str:
-    """Use huggingface_hub.snapshot_download with progress emission so the
-    UI can show a real progress bar before from_pretrained runs."""
+    """Use huggingface_hub.snapshot_download for the real download, and
+    a background polling thread to emit accurate progress events based
+    on the on-disk byte count of the per-repo cache directory."""
+    import threading
     from huggingface_hub import snapshot_download  # type: ignore
-    tqdm_class = _make_progress_tqdm()
+
     emit({"event": "download_start", "model_id": model_id})
-    if tqdm_class is not None:
-        path = snapshot_download(repo_id=model_id, tqdm_class=tqdm_class)
-    else:
+
+    repo_dir = _hf_repo_cache_dir(model_id)
+    # Establish a baseline so we report new bytes since the user clicked
+    # download (otherwise existing partial bytes look like instant progress).
+    base_done, base_pending = _measure_cached_bytes(repo_dir)
+    base_total = base_done + base_pending
+
+    stop = threading.Event()
+
+    def poll():
+        while not stop.is_set():
+            done, pending = _measure_cached_bytes(repo_dir)
+            emit({
+                "event": "download_progress",
+                "phase": "poll",
+                "desc": "Downloading model from HuggingFace",
+                "unit": "B",
+                "n": int(done + pending),
+                "total": 0,            # total is filled in by Swift via /tree
+                "baseline": int(base_total),
+            })
+            stop.wait(1.0)
+
+    t = threading.Thread(target=poll, daemon=True)
+    t.start()
+
+    try:
         path = snapshot_download(repo_id=model_id)
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+
+    # Final tick so the UI lands on the true post-download value.
+    done, pending = _measure_cached_bytes(repo_dir)
+    emit({
+        "event": "download_progress",
+        "phase": "final",
+        "desc": "Download complete",
+        "unit": "B",
+        "n": int(done + pending),
+        "total": int(done + pending),
+        "baseline": int(base_total),
+    })
+
     emit({"event": "download_done", "model_id": model_id, "snapshot_path": str(path)})
     return path
 

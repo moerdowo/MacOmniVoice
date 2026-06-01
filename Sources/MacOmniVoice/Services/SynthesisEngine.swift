@@ -130,9 +130,24 @@ final class SynthesisEngine: ObservableObject {
             appendLog("Downloading \(event["model_id"] ?? "")…")
         case "download_progress":
             let n = (event["n"] as? Int).map(Int64.init) ?? 0
-            let total = (event["total"] as? Int).map(Int64.init) ?? 0
+            var total = (event["total"] as? Int).map(Int64.init) ?? 0
             let desc = (event["desc"] as? String) ?? "Downloading"
+            // The runner has no idea what the repo total is; fill it
+            // in from the cached HF tree response on the Swift side.
+            if total == 0, let knownTotal = modelManager?.remote?.totalBytes, knownTotal > 0 {
+                total = knownTotal
+            }
             downloadProgress = DownloadProgress(label: desc, n: n, total: total)
+            // Mirror the live bytes into the model manager so the status
+            // headline ("Partial download · 41%") moves too.
+            if let mm = modelManager {
+                let existing = mm.local
+                mm.local = .init(
+                    revision: existing?.revision ?? "",
+                    snapshotPath: existing?.snapshotPath ?? "",
+                    sizeOnDisk: n
+                )
+            }
         case "download_done":
             state = .ready
             downloadProgress = nil

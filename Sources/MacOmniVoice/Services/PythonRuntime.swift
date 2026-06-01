@@ -284,6 +284,15 @@ final class PythonRuntime: ObservableObject {
         p.arguments = [runnerScript.path]
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
+        // huggingface_hub 1.x routes large blobs through Xet Storage by
+        // default. The hf_xet client hangs after the token handshake on
+        // some networks, leaving downloads pinned at 0 bytes. Forcing
+        // plain HTTPS download (which sustains ~10 MB/s here) is far
+        // more reliable for a desktop app, so disable Xet unless the
+        // user explicitly opts in via MACOMNIVOICE_USE_XET=1.
+        if ProcessInfo.processInfo.environment["MACOMNIVOICE_USE_XET"] != "1" {
+            env["HF_HUB_DISABLE_XET"] = "1"
+        }
         // Allow the user to choose the mainland mirror via env if HF is blocked.
         if env["HF_ENDPOINT"] == nil, ProcessInfo.processInfo.environment["MACOMNIVOICE_HF_MIRROR"] == "1" {
             env["HF_ENDPOINT"] = "https://hf-mirror.com"
