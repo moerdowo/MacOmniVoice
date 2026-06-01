@@ -75,7 +75,7 @@ private struct ModelStatusBarBody: View {
                 Label("Finder", systemImage: "folder")
             }
             .controlSize(.small)
-            .help("Reveal the model folder in Finder")
+            .help(finderTooltip)
 
             if case .behind = mm.updateState {
                 Button {
@@ -111,10 +111,18 @@ private struct ModelStatusBarBody: View {
         if exists, isDir.boolValue {
             NSWorkspace.shared.open(url)
         } else if exists {
+            // For a file (e.g. model.safetensors symlink), use the
+            // activateFileViewerSelecting variant so Finder opens the
+            // parent folder with the file highlighted.
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
             NSWorkspace.shared.open(PythonRuntime.appSupportDir)
         }
+    }
+
+    private var finderTooltip: String {
+        guard let url = mm.revealableLocation() else { return "Reveal model in Finder" }
+        return "Reveal in Finder: \(url.path)"
     }
 
     private func icon(for state: ModelManager.UpdateState) -> String {

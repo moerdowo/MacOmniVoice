@@ -151,15 +151,30 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Returns the directory containing the locally cached model snapshot
-    /// (if any), otherwise the HF Hub cache root that we can still reveal.
+    /// Best location to reveal in Finder. Prefers the main weights file
+    /// (model.safetensors) inside the snapshot, falling back to the
+    /// snapshot dir, then the HF cache root, then app support.
     func revealableLocation() -> URL? {
+        let fm = FileManager.default
         if let local = local {
-            return URL(fileURLWithPath: local.snapshotPath)
+            let snap = URL(fileURLWithPath: local.snapshotPath)
+            let mainName = remote?.mainFileName.isEmpty == false
+                ? remote!.mainFileName
+                : "model.safetensors"
+            let mainFile = snap.appendingPathComponent(mainName)
+            if fm.fileExists(atPath: mainFile.path) {
+                return mainFile
+            }
+            // Fall back to first .safetensors we can find at the snapshot root.
+            if let kids = try? fm.contentsOfDirectory(at: snap, includingPropertiesForKeys: nil),
+               let st = kids.first(where: { $0.pathExtension == "safetensors" }) {
+                return st
+            }
+            return snap
         }
         let cache = (NSHomeDirectory() as NSString)
             .appendingPathComponent(".cache/huggingface/hub")
-        if FileManager.default.fileExists(atPath: cache) {
+        if fm.fileExists(atPath: cache) {
             return URL(fileURLWithPath: cache)
         }
         return PythonRuntime.appSupportDir
