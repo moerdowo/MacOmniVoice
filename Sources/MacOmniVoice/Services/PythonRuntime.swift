@@ -59,6 +59,14 @@ final class PythonRuntime: ObservableObject {
     @Published private(set) var isRunnerLive: Bool = false
     @Published private(set) var detectedDevice: String? = nil
     @Published private(set) var samplingRate: Int = 24_000
+    /// Number of times the runner has been auto-restarted since launch.
+    @Published private(set) var restartCount: Int = 0
+    /// Reason for the last unexpected exit, surfaced after auto-restart.
+    @Published private(set) var lastCrashMessage: String? = nil
+    /// Flag flipped on each successful start so observers can re-bind.
+    @Published private(set) var generation: Int = 0
+    /// Disable auto-restart (used during intentional shutdown / setup).
+    var autoRestartEnabled: Bool = true
 
     // MARK: - Subprocess plumbing
 
@@ -328,15 +336,33 @@ final class PythonRuntime: ObservableObject {
                   let s = String(data: data, encoding: .utf8) else { return }
             FileHandle.standardError.write(Data(("[runner-stderr] " + s).utf8))
         }
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
-                self?.isRunnerLive = false
-                self?.eventContinuation?.finish()
+                guard let self else { return }
+                self.isRunnerLive = false
+                self.eventContinuation?.finish()
+                // Auto-restart unless we intentionally stopped it.
+                if self.autoRestartEnabled {
+                    let code = proc.terminationStatus
+                    self.lastCrashMessage = "Runner exited with status \(code); auto-restarting…"
+                    self.restartCount += 1
+                    // Tiny delay so we don't pin a tight loop if it's a
+                    // hard import error that always fails immediately.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        guard self.autoRestartEnabled, !self.isRunnerLive else { return }
+                        do {
+                            try self.startRunnerIfNeeded()
+                        } catch {
+                            self.lastCrashMessage = "Auto-restart failed: \(error.localizedDescription)"
+                        }
+                    }
+                }
             }
         }
 
         try p.run()
         self.isRunnerLive = true
+        self.generation &+= 1
     }
 
     private func ingestStdout(_ data: Data) {
@@ -374,6 +400,7 @@ final class PythonRuntime: ObservableObject {
     }
 
     func stopRunner() {
+        autoRestartEnabled = false
         if isRunnerLive {
             try? send(["action": "quit"])
         }

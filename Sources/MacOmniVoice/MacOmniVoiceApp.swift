@@ -13,7 +13,18 @@ struct MacOmniVoiceApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) {
+                Button("Open Project…") {
+                    if let doc = ProjectStore.openWithPanel() {
+                        appState.pendingProjectDocument = doc
+                    }
+                }
+                .keyboardShortcut("O", modifiers: [.command])
+                Button("Save Project…") {
+                    NotificationCenter.default.post(name: .saveProject, object: nil)
+                }
+                .keyboardShortcut("S", modifiers: [.command])
+            }
             CommandGroup(after: .appInfo) {
                 Button("Check for Model Update…") {
                     Task { await appState.modelManager.checkForUpdate(force: true) }

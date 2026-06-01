@@ -15,6 +15,14 @@ struct MainView: View {
     @State private var showRecorder: Bool = false
     @State private var showLibrary: Bool = false
     @State private var showSaveToLibrary: Bool = false
+    @State private var showDiagnostics: Bool = false
+    @State private var showHistory: Bool = false
+    @State private var showQueue: Bool = false
+    @State private var longForm: Bool = false
+    @State private var longFormProgress: (done: Int, total: Int)? = nil
+    @State private var showSymbolPicker: Bool = false
+    @State private var showVoiceDesign: Bool = false
+    @State private var detectedLanguage: (code: String, name: String)? = nil
     @State private var errorMessage: String? = nil
     @StateObject private var recorder = AudioRecorderService()
 
@@ -25,6 +33,9 @@ struct MainView: View {
                     titleRow
                     modelStatusCard
                     textInputCard
+                    if showVoiceDesign {
+                        VoiceDesignPanel()
+                    }
                     referenceAudioCard
                     if showAdvanced {
                         AdvancedSettingsView()
@@ -55,6 +66,12 @@ struct MainView: View {
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Button {
+                    showVoiceDesign.toggle()
+                } label: {
+                    Label(showVoiceDesign ? "Hide Voice Design" : "Voice Design",
+                          systemImage: "person.crop.circle.badge.questionmark")
+                }
+                Button {
                     showAdvanced.toggle()
                 } label: {
                     Label(showAdvanced ? "Hide Advanced" : "Advanced",
@@ -72,6 +89,21 @@ struct MainView: View {
                     Task { await app.modelManager.checkForUpdate(force: true) }
                 } label: {
                     Label("Check for Update", systemImage: "arrow.triangle.2.circlepath")
+                }
+                Button {
+                    showHistory = true
+                } label: {
+                    Label("History", systemImage: "clock.arrow.circlepath")
+                }
+                Button {
+                    showQueue = true
+                } label: {
+                    Label("Queue", systemImage: "list.number")
+                }
+                Button {
+                    showDiagnostics = true
+                } label: {
+                    Label("Diagnostics", systemImage: "stethoscope")
                 }
                 Button {
                     withAnimation { showConsole.toggle() }
@@ -104,8 +136,29 @@ struct MainView: View {
             )
             .environmentObject(app)
         }
+        .sheet(isPresented: $showDiagnostics) {
+            DiagnosticsView().environmentObject(app)
+        }
+        .sheet(isPresented: $showHistory) {
+            HistoryView(onLoad: { rec in
+                loadFromHistory(rec)
+            })
+            .environmentObject(app)
+        }
+        .sheet(isPresented: $showQueue) {
+            QueueView(requestBuilder: { _ in currentRequest() })
+                .environmentObject(app)
+        }
+        .onChange(of: app.pendingProjectDocument) { _, doc in
+            if let doc { applyProjectDocument(doc); app.pendingProjectDocument = nil }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveProject)) { _ in
+            saveProject()
+        }
         .onAppear {
             app.synthesisEngine.attach(modelManager: app.modelManager)
+            app.synthesisEngine.attach(history: app.history)
+            app.synthesisEngine.diagnostics = app.diagnostics
             do {
                 try app.synthesisEngine.startRunnerAndPump()
             } catch {
@@ -143,7 +196,20 @@ struct MainView: View {
     private var textInputCard: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
-                Label("Text to synthesize", systemImage: "text.alignleft").font(.headline)
+                HStack {
+                    Label("Text to synthesize", systemImage: "text.alignleft").font(.headline)
+                    Spacer()
+                    Button {
+                        showSymbolPicker = true
+                    } label: {
+                        Label("Symbol", systemImage: "speaker.wave.2.bubble")
+                    }
+                    .controlSize(.small)
+                    .help("Insert non-verbal symbols like [laughter] or [sigh]")
+                    .popover(isPresented: $showSymbolPicker, arrowEdge: .top) {
+                        SymbolPickerPopover(text: $text)
+                    }
+                }
                 TextEditor(text: $text)
                     .font(.body)
                     .frame(minHeight: 110)
@@ -152,6 +218,29 @@ struct MainView: View {
                     .background(.background.secondary)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
+
+                if let det = detectedLanguage,
+                   det.code != app.settings.language,
+                   !text.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "globe").foregroundStyle(.tint)
+                        Text("Detected \(det.name) (\(det.code)).")
+                            .font(.caption)
+                        Button("Use \(det.code)") {
+                            app.settings.language = det.code
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                        Button("Dismiss") {
+                            detectedLanguage = nil
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.borderless)
+                    }
+                    .padding(8)
+                    .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                }
+
                 HStack {
                     Text("\(text.count) chars")
                         .foregroundStyle(.tertiary)
@@ -165,6 +254,9 @@ struct MainView: View {
                 }
             }
             .padding(8)
+            .onChange(of: text) { _, newValue in
+                detectedLanguage = LanguageDetector.detect(newValue)
+            }
         }
     }
 
@@ -276,6 +368,7 @@ struct MainView: View {
 
     private var generateRow: some View {
         let preflight = app.preflightForGenerate(text: text)
+        let suggestLongForm = text.count > 400
         return VStack(alignment: .trailing, spacing: 6) {
             HStack {
                 if case let .blocked(reason, hint) = preflight {
@@ -289,6 +382,21 @@ struct MainView: View {
                     }
                 }
                 Spacer()
+                Toggle(isOn: $longForm) {
+                    Label("Long form", systemImage: "text.justify")
+                        .foregroundStyle(suggestLongForm ? Color.orange : Color.primary)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help("Split long text by sentence, synth each chunk, stitch them into one WAV.")
+
+                Button {
+                    Task { await reroll() }
+                } label: { Label("Re-roll", systemImage: "dice") }
+                .controlSize(.large)
+                .disabled(preflight != .ready)
+                .help("Same text + ref, new class-temperature so you get a different take.")
+
                 Button {
                     Task { await generate() }
                 } label: {
@@ -310,6 +418,12 @@ struct MainView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(preflight != .ready)
+            }
+            if let lp = longFormProgress, lp.total > 0 {
+                ProgressView(value: Double(lp.done), total: Double(lp.total))
+                    .progressViewStyle(.linear)
+                Text("Long-form chunk \(lp.done) / \(lp.total)")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
@@ -351,10 +465,9 @@ struct MainView: View {
         return url.path.hasPrefix(ReferenceLibrary.clipsDir.path)
     }
 
-    private func generate() async {
-        errorMessage = nil
+    private func currentRequest() -> SynthesisRequest {
         let s = app.settings
-        let req = SynthesisRequest(
+        return SynthesisRequest(
             text: text,
             refAudioPath: refAudioURL?.path,
             refText: refText.isEmpty ? nil : refText,
@@ -372,17 +485,159 @@ struct MainView: View {
             positionTemperature: s.positionTemperature,
             classTemperature: s.classTemperature
         )
+    }
+
+    private func stampRecordMeta() {
+        var clipID: UUID? = nil
+        if isFromLibrary, let url = refAudioURL {
+            clipID = app.referenceLibrary.clips.first(where: {
+                app.referenceLibrary.fileURL(for: $0).standardizedFileURL == url.standardizedFileURL
+            })?.id
+        }
+        app.synthesisEngine.nextRecordMeta = .init(
+            refClipID: clipID,
+            refClipName: refClipName.isEmpty ? nil : refClipName,
+            refAudioOriginalPath: refAudioURL?.path,
+            refText: refText.isEmpty ? nil : refText
+        )
+    }
+
+    private func generate() async {
+        errorMessage = nil
+        let req = currentRequest()
+        stampRecordMeta()
+        let s = app.settings
+        let device = s.deviceOverride.isEmpty ? nil : s.deviceOverride
+        do {
+            let out: URL
+            if longForm {
+                longFormProgress = (0, 0)
+                out = try await app.synthesisEngine.synthesizeLongForm(
+                    req, modelId: s.modelId, deviceOverride: device,
+                    progress: { done, total in
+                        longFormProgress = (done, total)
+                    }
+                )
+                longFormProgress = nil
+            } else {
+                out = try await app.synthesisEngine.synthesize(
+                    req, modelId: s.modelId, deviceOverride: device
+                )
+            }
+            player.load(url: out)
+            player.play()
+        } catch {
+            longFormProgress = nil
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func reroll() async {
+        errorMessage = nil
+        // Bump class_temperature a notch so the output varies even with
+        // the same text + reference. Stays inside the same Generate call
+        // so it's all-or-nothing under the isBusy guard.
+        var req = currentRequest()
+        let bump = Double.random(in: 0.4...1.5)
+        req.classTemperature = max(0, req.classTemperature) + bump
+        stampRecordMeta()
         do {
             let out = try await app.synthesisEngine.synthesize(
                 req,
-                modelId: s.modelId,
-                deviceOverride: s.deviceOverride.isEmpty ? nil : s.deviceOverride
+                modelId: app.settings.modelId,
+                deviceOverride: app.settings.deviceOverride.isEmpty ? nil : app.settings.deviceOverride
             )
             player.load(url: out)
             player.play()
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func applyProjectDocument(_ doc: ProjectDocument) {
+        text = doc.text
+        refText = doc.refText ?? ""
+        if let id = doc.refClipID,
+           let clip = app.referenceLibrary.clip(withId: id) {
+            refAudioURL = app.referenceLibrary.fileURL(for: clip)
+            refClipName = clip.name
+        } else if let path = doc.refAudioPath,
+                  FileManager.default.fileExists(atPath: path) {
+            refAudioURL = URL(fileURLWithPath: path)
+            refClipName = doc.refClipName ?? ""
+        }
+        let s = app.settings
+        s.modelId = doc.modelId
+        s.language = doc.language
+        s.instruct = doc.instruct
+        s.speed = doc.speed
+        s.duration = doc.duration
+        s.numStep = doc.numStep
+        s.guidanceScale = doc.guidanceScale
+        s.denoise = doc.denoise
+        s.postprocessOutput = doc.postprocessOutput
+        s.preprocessPrompt = doc.preprocessPrompt
+        s.tShift = doc.tShift
+        s.layerPenaltyFactor = doc.layerPenaltyFactor
+        s.positionTemperature = doc.positionTemperature
+        s.classTemperature = doc.classTemperature
+        s.deviceOverride = doc.deviceOverride
+    }
+
+    private func saveProject() {
+        var clipID: UUID? = nil
+        if isFromLibrary, let url = refAudioURL {
+            clipID = app.referenceLibrary.clips.first(where: {
+                app.referenceLibrary.fileURL(for: $0).standardizedFileURL == url.standardizedFileURL
+            })?.id
+        }
+        let doc = ProjectStore.capture(
+            text: text,
+            refClipID: clipID,
+            refClipName: refClipName.isEmpty ? nil : refClipName,
+            refAudioPath: refAudioURL?.path,
+            refText: refText.isEmpty ? nil : refText,
+            settings: app.settings
+        )
+        let suggested = refClipName.isEmpty
+            ? String(text.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines)
+            : refClipName
+        ProjectStore.saveWithPanel(doc, defaultName: suggested.isEmpty ? "Untitled" : suggested)
+    }
+
+    private func loadFromHistory(_ rec: GenerationRecord) {
+        text = rec.text
+        refText = rec.refText ?? ""
+        // Restore the ref clip if it's still in the library
+        if let id = rec.refClipID,
+           let clip = app.referenceLibrary.clip(withId: id) {
+            refAudioURL = app.referenceLibrary.fileURL(for: clip)
+            refClipName = clip.name
+        } else if let path = rec.refAudioOriginalPath,
+                  FileManager.default.fileExists(atPath: path) {
+            refAudioURL = URL(fileURLWithPath: path)
+            refClipName = ""
+        } else {
+            refAudioURL = nil
+            refClipName = ""
+        }
+        let s = app.settings
+        s.language = rec.language ?? ""
+        s.instruct = rec.instruct ?? ""
+        s.speed = rec.speed
+        s.duration = rec.duration ?? 0
+        s.numStep = rec.numStep
+        s.guidanceScale = rec.guidanceScale
+        s.denoise = rec.denoise
+        s.postprocessOutput = rec.postprocessOutput
+        s.preprocessPrompt = rec.preprocessPrompt
+        s.tShift = rec.tShift
+        s.layerPenaltyFactor = rec.layerPenaltyFactor
+        s.positionTemperature = rec.positionTemperature
+        s.classTemperature = rec.classTemperature
+        // And play the existing file so the user hears it instantly
+        player.load(url: rec.fileURL)
+        player.play()
     }
 }
 

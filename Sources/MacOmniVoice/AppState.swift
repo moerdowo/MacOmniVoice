@@ -9,8 +9,14 @@ final class AppState: ObservableObject {
     let synthesisEngine: SynthesisEngine
     let settings = AppSettings()
     let referenceLibrary = ReferenceLibrary()
+    let diagnostics = DiagnosticsService()
+    let history = GenerationHistory()
+    let transcription = TranscriptionService()
 
     @Published var currentStage: AppStage = .checking
+    /// Set when the user picks Open Project; MainView watches this and
+    /// applies the document, then clears it.
+    @Published var pendingProjectDocument: ProjectDocument? = nil
 
     enum AppStage: Equatable {
         case checking
@@ -33,6 +39,15 @@ final class AppState: ObservableObject {
         pythonRuntime.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
         settings.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
         referenceLibrary.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+        diagnostics.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+        history.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+        transcription.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+
+        // Route transcribe_done events from the runner stream into the
+        // transcription service via the engine's event tap.
+        synthesisEngine.eventTap = { [weak transcription] event in
+            transcription?.handle(event: event)
+        }
 
         Task { await bootstrap() }
     }

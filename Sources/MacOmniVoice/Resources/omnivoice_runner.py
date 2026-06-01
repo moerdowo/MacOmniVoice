@@ -350,6 +350,144 @@ def download_model(model_id: str) -> None:
     _ensure_model_downloaded(model_id)
 
 
+def verify_model(model_id: str) -> None:
+    """Verify SHA256 of the downloaded blobs against the HF Hub manifest.
+
+    Reports per-file pass/fail. Files we don't have locally are skipped
+    (caller is expected to check completeness separately).
+    """
+    import hashlib
+    from huggingface_hub import HfApi  # type: ignore
+
+    emit({"event": "verify_start", "model_id": model_id})
+
+    try:
+        api = HfApi()
+        files = api.list_repo_files(repo_id=model_id)
+        # tree gives us size + lfs (sha256) per file
+        tree = api.list_repo_tree(repo_id=model_id, recursive=True)
+        manifest = {}
+        for entry in tree:
+            if getattr(entry, "tree_id", None) is None:
+                # File. The .lfs.sha256 is the LFS pointer's SHA256.
+                lfs = getattr(entry, "lfs", None)
+                sha = getattr(lfs, "sha256", None) if lfs else None
+                manifest[entry.path] = {
+                    "size": getattr(entry, "size", 0),
+                    "sha256": sha,
+                }
+    except Exception as e:
+        emit({"event": "verify_done", "model_id": model_id,
+              "ok": False, "error": f"manifest fetch failed: {e}", "results": []})
+        return
+
+    repo_dir = _hf_repo_cache_dir(model_id)
+    # The actual files in the snapshot dir are symlinks to blobs.
+    snapshots = repo_dir / "snapshots"
+    if not snapshots.exists():
+        emit({"event": "verify_done", "model_id": model_id,
+              "ok": False, "error": "no local snapshot", "results": []})
+        return
+    snap_dirs = list(snapshots.iterdir())
+    if not snap_dirs:
+        emit({"event": "verify_done", "model_id": model_id,
+              "ok": False, "error": "no local snapshot", "results": []})
+        return
+    snap = snap_dirs[0]
+
+    results = []
+    overall_ok = True
+    for rel, info in manifest.items():
+        path = snap / rel
+        if not path.exists():
+            results.append({"path": rel, "status": "missing"})
+            continue
+        try:
+            real_size = path.stat().st_size
+        except OSError:
+            results.append({"path": rel, "status": "missing"})
+            continue
+        # Skip integrity hash for small non-LFS files (no sha in manifest).
+        expected_sha = info.get("sha256")
+        if not expected_sha:
+            if real_size == info.get("size"):
+                results.append({"path": rel, "status": "ok", "size": real_size})
+            else:
+                results.append({"path": rel, "status": "size_mismatch",
+                                "size": real_size, "expected": info.get("size")})
+                overall_ok = False
+            continue
+
+        # Stream-hash the file.
+        emit({"event": "verify_progress", "path": rel, "size": real_size})
+        h = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            digest = h.hexdigest()
+            if digest == expected_sha:
+                results.append({"path": rel, "status": "ok", "size": real_size})
+            else:
+                results.append({"path": rel, "status": "hash_mismatch",
+                                "size": real_size,
+                                "expected": expected_sha, "got": digest})
+                overall_ok = False
+        except OSError as e:
+            results.append({"path": rel, "status": "io_error", "error": str(e)})
+            overall_ok = False
+
+    emit({"event": "verify_done", "model_id": model_id,
+          "ok": overall_ok, "results": results})
+
+
+def whisper_transcribe(audio_path: str, language: str | None = None) -> None:
+    """Auto-transcribe a reference clip via whisper for library imports.
+
+    Uses faster-whisper if installed, then openai-whisper, then HF
+    whisper-tiny via transformers as a last resort. Emits a
+    transcribe_done event with the result.
+    """
+    emit({"event": "transcribe_start", "audio_path": audio_path})
+    text = ""
+    backend = "?"
+    try:
+        # 1) faster-whisper (preferred)
+        try:
+            from faster_whisper import WhisperModel  # type: ignore
+            model = WhisperModel("base", device="cpu", compute_type="int8")
+            segments, _info = model.transcribe(audio_path, language=language)
+            text = " ".join(s.text for s in segments).strip()
+            backend = "faster-whisper"
+        except Exception:
+            # 2) openai-whisper
+            try:
+                import whisper  # type: ignore
+                model = whisper.load_model("base")
+                result = model.transcribe(audio_path, language=language)
+                text = str(result.get("text", "")).strip()
+                backend = "openai-whisper"
+            except Exception:
+                # 3) transformers whisper-tiny
+                from transformers import pipeline  # type: ignore
+                pipe = pipeline(
+                    "automatic-speech-recognition",
+                    model="openai/whisper-tiny",
+                    chunk_length_s=30,
+                )
+                out = pipe(audio_path, return_timestamps=False)
+                text = str(out.get("text", "")).strip() if isinstance(out, dict) else str(out).strip()
+                backend = "transformers"
+        emit({"event": "transcribe_done", "audio_path": audio_path,
+              "text": text, "backend": backend})
+    except Exception as e:
+        emit({"event": "transcribe_done", "audio_path": audio_path,
+              "error": str(e), "text": "", "backend": backend})
+
+
 def main() -> None:
     try:
         for line in sys.stdin:
@@ -377,6 +515,10 @@ def main() -> None:
                     model_info(req["model_id"])
                 elif action == "download":
                     download_model(req["model_id"])
+                elif action == "verify":
+                    verify_model(req["model_id"])
+                elif action == "transcribe":
+                    whisper_transcribe(req["audio_path"], req.get("language"))
                 elif action == "quit":
                     emit({"event": "bye"})
                     return

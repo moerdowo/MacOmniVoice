@@ -70,7 +70,8 @@ final class ReferenceLibrary: ObservableObject {
     func importFile(from source: URL,
                     name: String,
                     description: String = "",
-                    referenceText: String = "") throws -> ReferenceClip {
+                    referenceText: String = "",
+                    tags: [String] = []) throws -> ReferenceClip {
         let fm = FileManager.default
         let ext = source.pathExtension.isEmpty ? "wav" : source.pathExtension.lowercased()
         let id = UUID()
@@ -97,7 +98,8 @@ final class ReferenceLibrary: ObservableObject {
             referenceText: referenceText,
             fileName: fileName,
             durationSeconds: durationSeconds.isFinite ? durationSeconds : 0,
-            byteSize: byteSize
+            byteSize: byteSize,
+            tags: tags
         )
         clips.insert(clip, at: 0)
         save()
@@ -106,8 +108,44 @@ final class ReferenceLibrary: ObservableObject {
 
     func update(_ updated: ReferenceClip) {
         guard let idx = clips.firstIndex(where: { $0.id == updated.id }) else { return }
-        clips[idx] = updated
+        var u = updated
+        u.tags = ReferenceClip.normalize(u.tags)
+        clips[idx] = u
         save()
+    }
+
+    func toggleFavourite(_ clip: ReferenceClip) {
+        var c = clip
+        c.isFavourite.toggle()
+        update(c)
+    }
+
+    /// All tags currently in the library, sorted by frequency desc.
+    var allTags: [(String, Int)] {
+        var counts: [String: Int] = [:]
+        for c in clips { for t in c.tags { counts[t, default: 0] += 1 } }
+        return counts.sorted { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) }
+    }
+
+    /// Replace the file behind a clip (used after trim). Keeps the same
+    /// id so history references stay valid.
+    func replaceFile(of clip: ReferenceClip, with newFile: URL) throws {
+        let dst = fileURL(for: clip)
+        if FileManager.default.fileExists(atPath: dst.path) {
+            try FileManager.default.removeItem(at: dst)
+        }
+        try FileManager.default.moveItem(at: newFile, to: dst)
+        // Recompute duration + size
+        let dur: Double = {
+            let asset = AVURLAsset(url: dst)
+            let s = CMTimeGetSeconds(asset.duration)
+            return s.isFinite ? s : clip.durationSeconds
+        }()
+        let size: Int64 = (try? FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? Int64) ?? clip.byteSize
+        var c = clip
+        c.durationSeconds = dur
+        c.byteSize = size
+        update(c)
     }
 
     func delete(_ clip: ReferenceClip) {

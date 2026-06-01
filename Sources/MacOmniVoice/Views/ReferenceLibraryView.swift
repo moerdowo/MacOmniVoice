@@ -16,35 +16,47 @@ struct ReferenceLibraryView: View {
 
     @State private var selection: ReferenceClip.ID? = nil
     @State private var editing: ReferenceClip? = nil
+    @State private var trimming: ReferenceClip? = nil
     @State private var showAddSheet = false
     @State private var importError: String? = nil
+
+    @State private var search: String = ""
+    @State private var selectedTag: String? = nil
+    @State private var favouritesOnly: Bool = false
+    @State private var transcribingId: UUID? = nil
+    @State private var testingId: UUID? = nil
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            tagChipBar
             Divider()
             content
             Divider()
             footer
         }
-        .frame(minWidth: 720, minHeight: 480)
+        .frame(minWidth: 760, minHeight: 540)
         .onDisappear {
             // Stop any preview when the library closes.
             soundPlayer.stop()
         }
         .sheet(isPresented: $showAddSheet) {
-            ReferenceClipEditor(mode: .add) { name, desc, refText, sourceURL in
-                addClip(name: name, desc: desc, refText: refText, source: sourceURL)
+            ReferenceClipEditor(mode: .add) { name, desc, refText, tags, sourceURL in
+                addClip(name: name, desc: desc, refText: refText, tags: tags, source: sourceURL)
             }
         }
         .sheet(item: $editing) { clip in
-            ReferenceClipEditor(mode: .edit(clip)) { name, desc, refText, _ in
+            ReferenceClipEditor(mode: .edit(clip)) { name, desc, refText, tags, _ in
                 var c = clip
                 c.name = name
                 c.description = desc
                 c.referenceText = refText
+                c.tags = ReferenceClip.normalize(tags)
                 app.referenceLibrary.update(c)
             }
+        }
+        .sheet(item: $trimming) { clip in
+            TrimSheet(clip: clip).environmentObject(app)
         }
         .alert("Import failed", isPresented: Binding(
             get: { importError != nil },
@@ -59,24 +71,80 @@ struct ReferenceLibraryView: View {
     // MARK: - Sections
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Reference Audio Library")
-                    .font(.title2).bold()
-                Text("Manage saved voice samples — 3–10 s of clean speech works best.")
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Reference Audio Library")
+                        .font(.title2).bold()
+                    Text("Manage saved voice samples — 3–10 s of clean speech works best.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
+                Spacer()
+                Button {
+                    showAddSheet = true
+                } label: {
+                    Label("Add clip…", systemImage: "plus.circle.fill")
+                }
+                .keyboardShortcut("n", modifiers: [.command])
+                .buttonStyle(.borderedProminent)
             }
-            Spacer()
-            Button {
-                showAddSheet = true
-            } label: {
-                Label("Add clip…", systemImage: "plus.circle.fill")
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search by name, description, transcript, tag…", text: $search)
+                    .textFieldStyle(.plain)
+                if !search.isEmpty {
+                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                }
+                Toggle(isOn: $favouritesOnly) {
+                    Label("Favourites", systemImage: "star.fill")
+                }
+                .toggleStyle(.button)
+                .controlSize(.small)
             }
-            .keyboardShortcut("n", modifiers: [.command])
-            .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(.background.secondary)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
         }
         .padding(20)
+    }
+
+    private var tagChipBar: some View {
+        let tags = app.referenceLibrary.allTags
+        return Group {
+            if !tags.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        Chip(text: "All",
+                             selected: selectedTag == nil,
+                             onTap: { selectedTag = nil })
+                        ForEach(tags, id: \.0) { tag, count in
+                            Chip(text: "\(tag) · \(count)",
+                                 selected: selectedTag == tag,
+                                 onTap: { selectedTag = (selectedTag == tag) ? nil : tag })
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 8)
+                }
+            }
+        }
+    }
+
+    private var filteredClips: [ReferenceClip] {
+        let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return app.referenceLibrary.clips.filter { c in
+            if favouritesOnly, !c.isFavourite { return false }
+            if let tag = selectedTag, !c.tags.contains(tag) { return false }
+            if !q.isEmpty {
+                let hay = (c.name + " " + c.description + " " + c.referenceText + " " + c.tags.joined(separator: " ")).lowercased()
+                if !hay.contains(q) { return false }
+            }
+            return true
+        }
     }
 
     private var content: some View {
@@ -107,20 +175,28 @@ struct ReferenceLibraryView: View {
 
     private var clipList: some View {
         List(selection: $selection) {
-            ForEach(app.referenceLibrary.clips) { clip in
+            ForEach(filteredClips) { clip in
                 ReferenceClipRow(
                     clip: clip,
                     isSelected: selection == clip.id,
-                    isPlaying: soundPlayer.isPlaying(app.referenceLibrary.fileURL(for: clip))
-                ) {
-                    togglePlay(clip)
-                }
+                    isPlaying: soundPlayer.isPlaying(app.referenceLibrary.fileURL(for: clip)),
+                    isTranscribing: transcribingId == clip.id,
+                    isTesting: testingId == clip.id,
+                    onTogglePlay: { togglePlay(clip) },
+                    onToggleFavourite: { app.referenceLibrary.toggleFavourite(clip) }
+                )
                 .tag(clip.id)
                 .contextMenu {
                     if onPick != nil {
                         Button("Use this clip") { onPick?(clip); dismiss() }
                     }
                     Button("Edit…") { editing = clip }
+                    Button("Trim…") { trimming = clip }
+                    Button("Test this voice…") { Task { await testVoice(clip) } }
+                    Button("Auto-transcribe with Whisper") { Task { await autoTranscribe(clip) } }
+                    Button(clip.isFavourite ? "Unfavourite" : "Mark as favourite") {
+                        app.referenceLibrary.toggleFavourite(clip)
+                    }
                     Button("Reveal in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([app.referenceLibrary.fileURL(for: clip)])
                     }
@@ -179,11 +255,15 @@ struct ReferenceLibraryView: View {
 
     // MARK: - Actions
 
-    private func addClip(name: String, desc: String, refText: String, source: URL?) {
+    private func addClip(name: String, desc: String, refText: String, tags: [String], source: URL?) {
         guard let source else { return }
         do {
-            _ = try app.referenceLibrary.importFile(
-                from: source, name: name, description: desc, referenceText: refText)
+            let clip = try app.referenceLibrary.importFile(
+                from: source, name: name, description: desc, referenceText: refText, tags: tags)
+            // If transcript was left blank, kick off auto-transcribe in the background.
+            if refText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Task { await autoTranscribe(clip) }
+            }
         } catch {
             importError = error.localizedDescription
         }
@@ -193,6 +273,85 @@ struct ReferenceLibraryView: View {
         let url = app.referenceLibrary.fileURL(for: clip)
         soundPlayer.toggle(url: url)
     }
+
+    private func autoTranscribe(_ clip: ReferenceClip) async {
+        guard transcribingId == nil else { return }
+        transcribingId = clip.id
+        defer { transcribingId = nil }
+        do {
+            let text = try await app.transcription.transcribe(
+                audio: app.referenceLibrary.fileURL(for: clip),
+                language: nil,
+                runtime: app.pythonRuntime
+            )
+            var c = clip
+            c.referenceText = text
+            app.referenceLibrary.update(c)
+        } catch {
+            importError = error.localizedDescription
+        }
+    }
+
+    private func testVoice(_ clip: ReferenceClip) async {
+        guard testingId == nil else { return }
+        testingId = clip.id
+        defer { testingId = nil }
+        let sentence = "The quick brown fox jumps over the lazy dog — this is a sample of the cloned voice."
+        let s = app.settings
+        let req = SynthesisRequest(
+            text: sentence,
+            refAudioPath: app.referenceLibrary.fileURL(for: clip).path,
+            refText: clip.referenceText.isEmpty ? nil : clip.referenceText,
+            language: s.language.isEmpty ? nil : s.language,
+            instruct: nil,
+            speed: s.speed,
+            duration: nil,
+            numStep: max(8, min(16, s.numStep)),
+            guidanceScale: s.guidanceScale,
+            denoise: s.denoise,
+            postprocessOutput: s.postprocessOutput,
+            preprocessPrompt: s.preprocessPrompt,
+            tShift: s.tShift,
+            layerPenaltyFactor: s.layerPenaltyFactor,
+            positionTemperature: s.positionTemperature,
+            classTemperature: s.classTemperature
+        )
+        app.synthesisEngine.nextRecordMeta = .init(
+            refClipID: clip.id,
+            refClipName: clip.name,
+            refAudioOriginalPath: app.referenceLibrary.fileURL(for: clip).path,
+            refText: clip.referenceText.isEmpty ? nil : clip.referenceText
+        )
+        do {
+            let out = try await app.synthesisEngine.synthesize(
+                req,
+                modelId: s.modelId,
+                deviceOverride: s.deviceOverride.isEmpty ? nil : s.deviceOverride
+            )
+            soundPlayer.play(url: out)
+        } catch {
+            importError = error.localizedDescription
+        }
+    }
+}
+
+/// Small selectable chip — used by the tag bar.
+struct Chip: View {
+    let text: String
+    let selected: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            Text(text)
+                .font(.caption)
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(selected ? Color.accentColor : Color.secondary.opacity(0.18),
+                            in: Capsule())
+                .foregroundStyle(selected ? Color.white : Color.primary)
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 // MARK: - Row
@@ -201,11 +360,14 @@ private struct ReferenceClipRow: View {
     let clip: ReferenceClip
     let isSelected: Bool
     let isPlaying: Bool
-    let onPlay: () -> Void
+    let isTranscribing: Bool
+    let isTesting: Bool
+    let onTogglePlay: () -> Void
+    let onToggleFavourite: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Button(action: onPlay) {
+            Button(action: onTogglePlay) {
                 Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
                     .imageScale(.large)
                     .foregroundStyle(isPlaying ? Color.red : Color.accentColor)
@@ -214,13 +376,40 @@ private struct ReferenceClipRow: View {
             .padding(.top, 2)
             .help(isPlaying ? "Stop" : "Play")
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(clip.name).font(.callout).bold()
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(clip.name).font(.callout).bold()
+                    Button(action: onToggleFavourite) {
+                        Image(systemName: clip.isFavourite ? "star.fill" : "star")
+                            .foregroundStyle(clip.isFavourite ? Color.yellow : Color.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(clip.isFavourite ? "Unfavourite" : "Mark as favourite")
+                    if isTranscribing {
+                        Label("transcribing…", systemImage: "ellipsis.bubble")
+                            .font(.caption2).foregroundStyle(.tint)
+                    }
+                    if isTesting {
+                        Label("testing…", systemImage: "sparkles")
+                            .font(.caption2).foregroundStyle(.tint)
+                    }
+                }
                 if !clip.description.isEmpty {
                     Text(clip.description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                }
+                if !clip.tags.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(clip.tags, id: \.self) { t in
+                            Text(t)
+                                .font(.caption2)
+                                .padding(.horizontal, 6).padding(.vertical, 1)
+                                .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                .foregroundStyle(.tint)
+                        }
+                    }
                 }
                 HStack(spacing: 10) {
                     Label(durationLabel, systemImage: "clock")
@@ -259,13 +448,14 @@ private struct ReferenceClipEditor: View {
         case edit(ReferenceClip)
     }
     let mode: Mode
-    let onSave: (_ name: String, _ desc: String, _ refText: String, _ sourceURL: URL?) -> Void
+    let onSave: (_ name: String, _ desc: String, _ refText: String, _ tags: [String], _ sourceURL: URL?) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String = ""
     @State private var description: String = ""
     @State private var referenceText: String = ""
+    @State private var tagsRaw: String = ""
     @State private var sourceURL: URL? = nil
 
     var body: some View {
@@ -288,6 +478,11 @@ private struct ReferenceClipEditor: View {
                 Text("Transcript (optional)").font(.callout).bold()
                 TextField("Whisper auto-transcribes if blank", text: $referenceText, axis: .vertical)
                     .lineLimit(2...5)
+                    .textFieldStyle(.roundedBorder)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Tags (comma-separated)").font(.callout).bold()
+                TextField("e.g. male, calm, narration", text: $tagsRaw)
                     .textFieldStyle(.roundedBorder)
             }
 
@@ -329,7 +524,8 @@ private struct ReferenceClipEditor: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button {
-                    onSave(name, description, referenceText, sourceURL)
+                    let tags = tagsRaw.split(separator: ",").map { String($0) }
+                    onSave(name, description, referenceText, tags, sourceURL)
                     dismiss()
                 } label: {
                     Text(isEdit ? "Save" : "Add to library").padding(.horizontal, 8)
@@ -346,6 +542,7 @@ private struct ReferenceClipEditor: View {
                 name = c.name
                 description = c.description
                 referenceText = c.referenceText
+                tagsRaw = c.tags.joined(separator: ", ")
             }
         }
     }

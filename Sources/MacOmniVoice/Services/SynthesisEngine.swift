@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// High-level orchestrator that talks to the Python runner for model load
@@ -60,24 +61,80 @@ final class SynthesisEngine: ObservableObject {
 
     private let runtime: PythonRuntime
     weak var modelManager: ModelManager?
+    weak var diagnostics: DiagnosticsService?
+    weak var history: GenerationHistory?
+    /// Extra metadata the engine should stamp on the next history record
+    /// — set by the MainView right before calling synthesize().
+    var nextRecordMeta: NextRecordMeta? = nil
+    /// External handler called for *every* event after engine-level
+    /// handling so other services (transcription, history) can hook in.
+    var eventTap: (([String: Any]) -> Void)? = nil
+
+    struct NextRecordMeta {
+        var refClipID: UUID?
+        var refClipName: String?
+        var refAudioOriginalPath: String?
+        var refText: String?
+    }
     private var pumpTask: Task<Void, Never>? = nil
     private var pendingSynthesisContinuation: CheckedContinuation<URL, Error>? = nil
     private var pendingLoadContinuation: CheckedContinuation<Void, Error>? = nil
     private var pendingDownloadContinuation: CheckedContinuation<Void, Error>? = nil
+    private var lastRuntimeGeneration: Int = 0
+    private var generationObserver: AnyCancellable? = nil
 
     init(runtime: PythonRuntime) {
         self.runtime = runtime
+        // Re-bind the event pump and reset state whenever the runtime
+        // process is (re)started — handles the auto-restart-on-crash path.
+        self.generationObserver = runtime.$generation
+            .receive(on: RunLoop.main)
+            .sink { [weak self] g in
+                guard let self else { return }
+                guard g > self.lastRuntimeGeneration else { return }
+                self.lastRuntimeGeneration = g
+                if g > 1 {
+                    self.handleRunnerRestart()
+                }
+                self.startPump()
+            }
+    }
+
+    private func handleRunnerRestart() {
+        appendLog("Runner restarted (generation #\(lastRuntimeGeneration)). Model needs to reload.")
+        modelLoaded = false
+        downloadProgress = nil
+        synthesisElapsed = 0
+        // Resume any pending continuations with a clear error so the
+        // caller's Task doesn't hang forever after a crash.
+        let err = NSError(domain: "OmniVoice", code: -4,
+                          userInfo: [NSLocalizedDescriptionKey: "Python runner restarted mid-operation."])
+        if let c = pendingSynthesisContinuation {
+            c.resume(throwing: err); pendingSynthesisContinuation = nil
+        }
+        if let c = pendingLoadContinuation {
+            c.resume(throwing: err); pendingLoadContinuation = nil
+        }
+        if let c = pendingDownloadContinuation {
+            c.resume(throwing: err); pendingDownloadContinuation = nil
+        }
+        isBusy = false
+        state = .ready
     }
 
     func attach(modelManager: ModelManager) {
         self.modelManager = modelManager
     }
 
+    func attach(history: GenerationHistory) {
+        self.history = history
+    }
+
     /// Start the persistent Python subprocess and begin pumping events.
+    /// The pump itself is wired by the generation observer in init().
     func startRunnerAndPump() throws {
         state = .startingRunner
         try runtime.startRunnerIfNeeded()
-        startPump()
         state = .ready
     }
 
@@ -100,6 +157,12 @@ final class SynthesisEngine: ObservableObject {
 
     private func handle(event: [String: Any]) async {
         let kind = event["event"] as? String ?? "?"
+
+        // Pass to diagnostics / external tap first so they can observe
+        // every event regardless of whether we have a switch case for it.
+        diagnostics?.handle(event: event)
+        eventTap?(event)
+
         switch kind {
         case "log":
             let lvl = (event["level"] as? String) ?? "info"
@@ -225,9 +288,6 @@ final class SynthesisEngine: ObservableObject {
     func synthesize(_ request: SynthesisRequest,
                     modelId: String,
                     deviceOverride: String?) async throws -> URL {
-        // Reject re-entrant calls. Prevents the click-twice bug where a
-        // second click overwrites pendingSynthesisContinuation and the
-        // first awaiting Task hangs forever.
         if isBusy {
             throw NSError(domain: "OmniVoice", code: -2,
                           userInfo: [NSLocalizedDescriptionKey: "Already generating — please wait."])
@@ -235,17 +295,33 @@ final class SynthesisEngine: ObservableObject {
         isBusy = true
         defer { isBusy = false }
 
+        return try await _synthesizeOne(request, modelId: modelId, deviceOverride: deviceOverride,
+                                        isLongForm: false)
+    }
+
+    /// Used by queue / long-form so they don't trip the isBusy guard
+    /// every chunk. Caller is responsible for setting isBusy.
+    func synthesizeChunk(_ request: SynthesisRequest,
+                         modelId: String,
+                         deviceOverride: String?) async throws -> URL {
+        try await _synthesizeOne(request, modelId: modelId, deviceOverride: deviceOverride,
+                                 isLongForm: true)
+    }
+
+    private func _synthesizeOne(_ request: SynthesisRequest,
+                                modelId: String,
+                                deviceOverride: String?,
+                                isLongForm: Bool) async throws -> URL {
         try await ensureModelLoaded(modelId: modelId, deviceOverride: deviceOverride)
 
-        // Write output to a temp file under appsupport/outputs.
-        let outDir = PythonRuntime.appSupportDir.appendingPathComponent("outputs", isDirectory: true)
-        try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let outDir = GenerationHistory.outputsDir
         let ts = ISO8601DateFormatter()
         ts.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
         let stamp = ts.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
             .replacingOccurrences(of: ".", with: "-")
-        let outURL = outDir.appendingPathComponent("omnivoice-\(stamp).wav")
+        let fileName = "omnivoice-\(stamp).wav"
+        let outURL = outDir.appendingPathComponent(fileName)
 
         let payload: [String: Any] = [
             "action": "synthesize",
@@ -253,10 +329,7 @@ final class SynthesisEngine: ObservableObject {
             "params": request.toParams(),
         ]
 
-        return try await withCheckedThrowingContinuation { cont in
-            // Defensive: if a continuation is somehow still pending (e.g.
-            // a previous synth was abandoned), resume it with an error
-            // before overwriting so it doesn't leak.
+        let url: URL = try await withCheckedThrowingContinuation { cont in
             if let stale = self.pendingSynthesisContinuation {
                 stale.resume(throwing: NSError(
                     domain: "OmniVoice", code: -3,
@@ -270,6 +343,100 @@ final class SynthesisEngine: ObservableObject {
                 cont.resume(throwing: error)
             }
         }
+
+        // Record to history (only for whole-shot calls; long-form does
+        // its own bookkeeping after concat).
+        if !isLongForm, let history = history {
+            let rec = makeRecord(request: request, file: url, elapsed: synthesisElapsed)
+            history.add(rec)
+            nextRecordMeta = nil
+        }
+        return url
+    }
+
+    private func makeRecord(request: SynthesisRequest, file: URL, elapsed: Double) -> GenerationRecord {
+        let m = nextRecordMeta
+        return GenerationRecord(
+            text: request.text,
+            fileName: file.lastPathComponent,
+            elapsed: elapsed,
+            sampleRate: runtime.samplingRate,
+            refClipID: m?.refClipID,
+            refClipName: m?.refClipName,
+            refAudioOriginalPath: m?.refAudioOriginalPath ?? request.refAudioPath,
+            refText: request.refText,
+            language: request.language,
+            instruct: request.instruct,
+            speed: request.speed,
+            duration: request.duration,
+            numStep: request.numStep,
+            guidanceScale: request.guidanceScale,
+            denoise: request.denoise,
+            postprocessOutput: request.postprocessOutput,
+            preprocessPrompt: request.preprocessPrompt,
+            tShift: request.tShift,
+            layerPenaltyFactor: request.layerPenaltyFactor,
+            positionTemperature: request.positionTemperature,
+            classTemperature: request.classTemperature,
+            device: runtime.detectedDevice
+        )
+    }
+
+    /// Long-form: split text by sentence, synth each chunk, concatenate,
+    /// record one history entry for the stitched result.
+    func synthesizeLongForm(_ request: SynthesisRequest,
+                            modelId: String,
+                            deviceOverride: String?,
+                            progress: ((Int, Int) -> Void)? = nil) async throws -> URL {
+        if isBusy {
+            throw NSError(domain: "OmniVoice", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "Already generating — please wait."])
+        }
+        isBusy = true
+        defer { isBusy = false }
+
+        let chunks = TextSplitter.split(request.text)
+        if chunks.isEmpty {
+            throw NSError(domain: "OmniVoice", code: -5,
+                          userInfo: [NSLocalizedDescriptionKey: "No text to synthesize."])
+        }
+        if chunks.count == 1 {
+            return try await _synthesizeOne(request, modelId: modelId,
+                                            deviceOverride: deviceOverride, isLongForm: false)
+        }
+        appendLog("Long-form: \(chunks.count) chunks")
+        progress?(0, chunks.count)
+
+        var pieces: [URL] = []
+        for (idx, c) in chunks.enumerated() {
+            var r = request
+            r.text = c
+            do {
+                let part = try await synthesizeChunk(r, modelId: modelId, deviceOverride: deviceOverride)
+                pieces.append(part)
+                progress?(idx + 1, chunks.count)
+            } catch {
+                throw error
+            }
+        }
+
+        let outDir = GenerationHistory.outputsDir
+        let ts = ISO8601DateFormatter()
+        ts.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
+        let stamp = ts.string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
+        let outURL = outDir.appendingPathComponent("omnivoice-longform-\(stamp).wav")
+        try AudioConcat.concat(pieces, into: outURL, silenceSeconds: 0.25)
+
+        // Clean up the per-chunk files — keep only the stitched output.
+        for p in pieces { try? FileManager.default.removeItem(at: p) }
+
+        if let history = history {
+            history.add(makeRecord(request: request, file: outURL, elapsed: synthesisElapsed))
+            nextRecordMeta = nil
+        }
+        return outURL
     }
 
     func downloadOrUpdateModel(modelId: String) async throws {

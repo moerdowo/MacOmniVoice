@@ -4,6 +4,7 @@ import AppKit
 struct OutputPlayerCard: View {
     let url: URL
     @ObservedObject var player: AudioPlayerService
+    @State private var showExport = false
 
     var body: some View {
         GroupBox {
@@ -52,10 +53,20 @@ struct OutputPlayerCard: View {
                     } label: {
                         Image(systemName: "square.and.arrow.down")
                     }
-                    .help("Save a copy")
+                    .help("Save a copy (WAV)")
+
+                    Button {
+                        showExport = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.up.on.square")
+                    }
+                    .help("Export to another format (MP3 / AAC / FLAC / …)")
                 }
             }
             .padding(8)
+            .sheet(isPresented: $showExport) {
+                ExportSheet(source: url)
+            }
             .onAppear { player.load(url: url) }
             .onChange(of: url) { _, new in player.load(url: new) }
         }
