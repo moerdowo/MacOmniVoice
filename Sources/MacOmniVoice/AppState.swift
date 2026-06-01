@@ -8,6 +8,7 @@ final class AppState: ObservableObject {
     let modelManager = ModelManager()
     let synthesisEngine: SynthesisEngine
     let settings = AppSettings()
+    let referenceLibrary = ReferenceLibrary()
 
     @Published var currentStage: AppStage = .checking
 
@@ -31,6 +32,7 @@ final class AppState: ObservableObject {
         synthesisEngine.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
         pythonRuntime.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
         settings.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
+        referenceLibrary.objectWillChange.sink { _ in forward() }.store(in: &cancellables)
 
         Task { await bootstrap() }
     }

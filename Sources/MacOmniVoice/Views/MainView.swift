@@ -9,9 +9,12 @@ struct MainView: View {
     @State private var text: String = "Hello, this is a test of zero-shot voice cloning."
     @State private var refText: String = ""
     @State private var refAudioURL: URL? = nil
+    @State private var refClipName: String = ""        // empty unless from the library
     @State private var showAdvanced: Bool = false
     @State private var showConsole: Bool = false
     @State private var showRecorder: Bool = false
+    @State private var showLibrary: Bool = false
+    @State private var showSaveToLibrary: Bool = false
     @State private var errorMessage: String? = nil
     @StateObject private var recorder = AudioRecorderService()
 
@@ -57,6 +60,12 @@ struct MainView: View {
                     Label(showAdvanced ? "Hide Advanced" : "Advanced",
                           systemImage: "slider.horizontal.3")
                 }
+                Button {
+                    showLibrary = true
+                } label: {
+                    Label("Library", systemImage: "books.vertical.fill")
+                }
+                .help("Reference audio library")
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -73,6 +82,28 @@ struct MainView: View {
             }
         }
         .environmentObject(player)
+        .sheet(isPresented: $showLibrary) {
+            ReferenceLibraryView(onPick: { clip in
+                refAudioURL = app.referenceLibrary.fileURL(for: clip)
+                refClipName = clip.name
+                if !clip.referenceText.isEmpty {
+                    refText = clip.referenceText
+                }
+            })
+            .environmentObject(app)
+        }
+        .sheet(isPresented: $showSaveToLibrary) {
+            SaveToLibrarySheet(
+                source: refAudioURL,
+                initialRefText: refText,
+                onSaved: { clip in
+                    // After saving, switch the current ref to the library copy
+                    refAudioURL = app.referenceLibrary.fileURL(for: clip)
+                    refClipName = clip.name
+                }
+            )
+            .environmentObject(app)
+        }
         .onAppear {
             app.synthesisEngine.attach(modelManager: app.modelManager)
             do {
@@ -140,13 +171,21 @@ struct MainView: View {
     private var referenceAudioCard: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                Label("Reference audio (voice to clone)", systemImage: "waveform")
-                    .font(.headline)
+                HStack {
+                    Label("Reference audio (voice to clone)", systemImage: "waveform")
+                        .font(.headline)
+                    Spacer()
+                    if !app.referenceLibrary.clips.isEmpty {
+                        Text("\(app.referenceLibrary.clips.count) in library")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 HStack(spacing: 10) {
                     if let refAudioURL {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(refAudioURL.lastPathComponent)
+                            Text(refClipName.isEmpty ? refAudioURL.lastPathComponent : refClipName)
                                 .font(.callout).bold()
                                 .lineLimit(1).truncationMode(.middle)
                             Text(refAudioURL.deletingLastPathComponent().path)
@@ -155,17 +194,39 @@ struct MainView: View {
                                 .lineLimit(1).truncationMode(.middle)
                         }
                         Spacer()
+                        if isFromLibrary {
+                            Label("from library", systemImage: "books.vertical")
+                                .font(.caption2)
+                                .foregroundStyle(.tint)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.tint.opacity(0.12), in: Capsule())
+                        } else {
+                            Button {
+                                showSaveToLibrary = true
+                            } label: {
+                                Label("Save to library", systemImage: "tray.and.arrow.down")
+                            }
+                            .controlSize(.small)
+                            .help("Add this clip to the reference library")
+                        }
                         Button(role: .destructive) {
                             self.refAudioURL = nil
+                            self.refClipName = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill").imageScale(.large)
                         }
                         .buttonStyle(.borderless)
                     } else {
-                        Text("Drop or pick a 3–10 s WAV/MP3/FLAC clip")
+                        Text("Drop or pick a 3–10 s WAV/MP3/FLAC clip — or open the library")
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
+                    Button {
+                        showLibrary = true
+                    } label: {
+                        Label("Library", systemImage: "books.vertical.fill")
+                    }
+                    .help("Open the reference audio library")
                     Button {
                         showRecorder = true
                     } label: {
@@ -177,6 +238,7 @@ struct MainView: View {
                             recorder: recorder,
                             onFinish: { url in
                                 refAudioURL = url
+                                refClipName = ""
                                 showRecorder = false
                             },
                             onCancel: { showRecorder = false }
@@ -278,7 +340,15 @@ struct MainView: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.audio, .wav, .mp3]
-        if panel.runModal() == .OK { refAudioURL = panel.url }
+        if panel.runModal() == .OK {
+            refAudioURL = panel.url
+            refClipName = ""
+        }
+    }
+
+    private var isFromLibrary: Bool {
+        guard let url = refAudioURL else { return false }
+        return url.path.hasPrefix(ReferenceLibrary.clipsDir.path)
     }
 
     private func generate() async {
