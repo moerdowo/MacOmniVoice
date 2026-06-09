@@ -12,7 +12,7 @@
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-blue?logo=apple&logoColor=white">
   <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-MPS-success?logo=apple">
-  <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-lightgrey">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 
 ---
@@ -213,4 +213,4 @@ MacOmniVoice/
 
 ## License
 
-App code: Apache-2.0 (matches OmniVoice). See the upstream [OmniVoice repository](https://github.com/k2-fsa/OmniVoice) for the model and inference-library license.
+App code is MIT (see [LICENSE](LICENSE)). The OmniVoice model and inference library it drives are Apache-2.0 — see the upstream [OmniVoice repository](https://github.com/k2-fsa/OmniVoice) for those terms.
