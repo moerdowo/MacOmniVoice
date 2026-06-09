@@ -17,6 +17,10 @@
 
 ---
 
+<p align="center">
+  <img src="docs/app-preview.png" alt="MacOmniVoice main window" width="720" />
+</p>
+
 MacOmniVoice is a real macOS application. SwiftUI for the UI; under the hood it manages a private Python virtual environment, drives a long-lived `omnivoice` subprocess over a JSON-line protocol, and surfaces the whole stack — install, model download, generation, library, history, queues — as native panels, sheets, and toolbars.
 
 Designed for people who want OmniVoice's voice quality without keeping a terminal open.
